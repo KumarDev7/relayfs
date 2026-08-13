@@ -15,6 +15,7 @@ futures.workspace = true
 tracing.workspace = true
 axum.workspace = true
 tokio-tungstenite.workspace = true
+rustls.workspace = true
 rand.workspace = true
 relayfs-protocol = { path = "../protocol" }
 relayfs-rpc = { path = "../rpc" }

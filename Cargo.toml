@@ -34,7 +34,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rmcp = { version = "3.1", features = ["server", "client", "macros", "schemars", "transport-io"] }
 
 # websocket
-tokio-tungstenite = "0.30"
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+rustls = { version = "0.23", features = ["ring"] }
 
 # http server
 axum = { version = "0.8", features = ["ws"] }

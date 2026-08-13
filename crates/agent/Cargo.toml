@@ -15,6 +15,7 @@ tokio-util.workspace = true
 futures.workspace = true
 tracing.workspace = true
 tokio-tungstenite.workspace = true
+rustls.workspace = true
 base64.workspace = true
 relayfs-protocol = { path = "../protocol" }
 relayfs-rpc = { path = "../rpc" }

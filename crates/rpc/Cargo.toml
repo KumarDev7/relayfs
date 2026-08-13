@@ -13,6 +13,7 @@ tokio.workspace = true
 tokio-util.workspace = true
 futures.workspace = true
 tokio-tungstenite.workspace = true
+rustls.workspace = true
 tracing.workspace = true
 relayfs-protocol = { path = "../protocol" }
 

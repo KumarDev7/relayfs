@@ -19,6 +19,9 @@ pub async fn run(
     name: &str,
     state: Arc<AgentState>,
 ) -> anyhow::Result<()> {
+    // rustls may be compiled with both aws-lc-rs and ring (feature
+    // unification); pick ring explicitly so wss:// works.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let url = relayfs_rpc::relay_ws_url(base_url);
     let (ws, _) = connect_async(&url).await?;
     info!("connected to relay {url}");
