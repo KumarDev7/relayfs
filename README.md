@@ -34,7 +34,18 @@ normal local path. Writes land on the remote machine immediately.
 The mount lives on the **mcp** machine (where you work); the target only
 serves file operations. Requires Linux with FUSE (`/dev/fuse` + `fusermount3`).
 
-## Build
+## Install
+
+One-liner (Linux x86_64 / aarch64; downloads the latest release binary,
+verifies its SHA-256 checksum, installs to `~/.local/bin`, and sets up PATH
+for new shells — no shell restart needed):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/KumarDev7/relayfs/main/scripts/install.sh | sh
+```
+
+Overrides: `RELAYFS_BIN_DIR` (install directory, default `~/.local/bin`),
+`RELAYFS_VERSION` (release tag, default `latest`). Or build from source:
 
 ```sh
 cargo build --release
