@@ -52,6 +52,7 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}
+          if-no-files-found: error
 
   release:
     name: publish GitHub release
@@ -62,6 +63,12 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+
+      - name: Generate combined checksums
+        run: |
+          cd dist
+          sha256sum relayfs-* > relayfs-sha256sums.txt
+          cat relayfs-sha256sums.txt
 
       - name: Create release
         uses: softprops/action-gh-release@v2
