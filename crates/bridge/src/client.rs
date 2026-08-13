@@ -1,29 +1,45 @@
 //! Bridge <-> agent RPC client over the relay.
+//!
+//! The client keeps a single WebSocket to the relay and reconnects
+//! automatically when the connection drops, so the MCP session never needs to
+//! restart. A supervisor task owns the connection lifecycle: connect ->
+//! handshake -> install sink -> spawn read loop + keepalive pings; when the
+//! read loop ends it clears the sink and retries after a short delay.
 
 use std::collections::HashMap;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use futures::{SinkExt, StreamExt};
-use relayfs_protocol::{Hello, PeerKind};
+use relayfs_protocol::{Hello, PeerKind, RpcError};
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex, RwLock};
-use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
+use tokio::sync::{oneshot, Mutex, RwLock};
+use tokio_tungstenite::{
+    connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream,
+};
 use tracing::{info, warn};
 
 pub type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
+pub type WsSink = futures::stream::SplitSink<WsStream, Message>;
 
 /// A pending request awaiting its response.
 struct Pending {
-    tx: tokio::sync::oneshot::Sender<Result<serde_json::Value, relayfs_protocol::RpcError>>,
+    tx: oneshot::Sender<Result<serde_json::Value, RpcError>>,
 }
 
 /// Client to the paired agent, safe to share across MCP tool calls and
 /// across threads (the FUSE layer calls it from its own runtime).
 #[derive(Clone)]
 pub struct AgentClient {
-    /// Sender half, shared. The read loop owns the receiver half.
-    sink: Arc<Mutex<futures::stream::SplitSink<WsStream, Message>>>,
-    next_id: Arc<std::sync::atomic::AtomicU64>,
+    base_url: String,
+    token: String,
+    id: String,
+    name: String,
+    /// Sink of the current connection; `None` while offline/reconnecting.
+    /// The supervisor task is the only writer.
+    sink: Arc<Mutex<Option<WsSink>>>,
+    next_id: Arc<AtomicU64>,
     pending: Arc<RwLock<HashMap<u64, Pending>>>,
     /// Agent id from the relay ack.
     pub agent_id: Arc<Mutex<Option<String>>>,
@@ -39,16 +55,114 @@ impl AgentClient {
         // rustls may be compiled with both aws-lc-rs and ring (feature
         // unification); pick ring explicitly so wss:// works.
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let url = relayfs_rpc::relay_ws_url(base_url);
+
+        let client = Self {
+            base_url: base_url.to_string(),
+            token: token.to_string(),
+            id: id.to_string(),
+            name: name.to_string(),
+            sink: Arc::new(Mutex::new(None)),
+            next_id: Arc::new(AtomicU64::new(1)),
+            pending: Arc::new(RwLock::new(HashMap::new())),
+            agent_id: Arc::new(Mutex::new(None)),
+        };
+
+        let supervisor = client.clone();
+        tokio::spawn(async move {
+            supervisor.supervisor().await;
+        });
+
+        // Best-effort wait for the first connection; the supervisor keeps
+        // retrying in the background either way.
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if client.sink.lock().await.is_some() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
+        Ok(client)
+    }
+
+    /// Connection lifecycle: loop connect -> handshake -> serve until the
+    /// read loop ends, then retry.
+    async fn supervisor(&self) {
+        const RETRY: Duration = Duration::from_secs(5);
+        loop {
+            match Self::open_connection(self).await {
+                Ok((sink, stream)) => {
+                    *self.sink.lock().await = Some(sink);
+                    info!("connected to relay, agent: {:?}", self.agent_id.lock().await);
+
+                    let (end_tx, end_rx) = oneshot::channel();
+                    {
+                        // Read loop: routes responses to pending requests.
+                        let read_client = self.clone();
+                        tokio::spawn(async move {
+                            read_client.read_loop(stream).await;
+                            let _ = end_tx.send(());
+                        });
+                    }
+                    {
+                        // Keepalive: ping every 25s so intermediaries
+                        // (Cloudflare, nginx) don't close the idle connection.
+                        let ping_sink = self.sink.clone();
+                        tokio::spawn(async move {
+                            let mut tick =
+                                tokio::time::interval(Duration::from_secs(25));
+                            tick.set_missed_tick_behavior(
+                                tokio::time::MissedTickBehavior::Skip,
+                            );
+                            loop {
+                                tick.tick().await;
+                                let mut guard = ping_sink.lock().await;
+                                match guard.as_mut() {
+                                    Some(sink) => {
+                                        if sink
+                                            .send(Message::Ping(Vec::new().into()))
+                                            .await
+                                            .is_err()
+                                        {
+                                            break;
+                                        }
+                                    }
+                                    None => break,
+                                }
+                            }
+                        });
+                    }
+
+                    let _ = end_rx.await;
+                    // Read loop ended: the connection is dead. Clear the sink
+                    // slot, then the outer loop reconnects.
+                    *self.sink.lock().await = None;
+                    info!("relay connection lost; reconnecting in 5s");
+                }
+                Err(e) => {
+                    warn!("relay connect failed: {e}; retrying in 5s");
+                }
+            }
+            tokio::time::sleep(RETRY).await;
+        }
+    }
+
+    /// Connect to the relay, handshake, and return the split connection.
+    async fn open_connection(
+        &self,
+    ) -> anyhow::Result<(WsSink, futures::stream::SplitStream<WsStream>)> {
+        let url = relayfs_rpc::relay_ws_url(&self.base_url);
         let (ws, _) = connect_async(&url).await?;
-        info!("connected to relay {url}");
         let (mut sink, mut stream) = ws.split();
 
         let hello = Hello {
             kind: PeerKind::Bridge,
-            id: id.to_string(),
-            name: name.to_string(),
-            token: Some(token.to_string()),
+            id: self.id.clone(),
+            name: self.name.clone(),
+            token: Some(self.token.clone()),
         };
         sink.send(Message::Text(serde_json::to_string(&hello)?.into()))
             .await?;
@@ -67,26 +181,13 @@ impl AgentClient {
                         .and_then(|p| p.get("agent_id"))
                         .and_then(|a| a.as_str())
                         .map(|s| s.to_string());
-                    info!("handshake complete, agent: {:?}", id);
                     break id;
                 }
             }
         };
+        *self.agent_id.lock().await = agent_id;
 
-        let client = Self {
-            sink: Arc::new(Mutex::new(sink)),
-            next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
-            pending: Arc::new(RwLock::new(HashMap::new())),
-            agent_id: Arc::new(Mutex::new(agent_id)),
-        };
-
-        // Spawn the read loop; it owns the receiver half.
-        let read_client = client.clone();
-        tokio::spawn(async move {
-            read_client.read_loop(stream).await;
-        });
-
-        Ok(client)
+        Ok((sink, stream))
     }
 
     /// Read loop: route responses to pending requests, log notifications.
@@ -106,7 +207,10 @@ impl AgentClient {
                 Message::Text(t) => t,
                 Message::Close(_) => break,
                 Message::Ping(p) => {
-                    let _ = self.sink.lock().await.send(Message::Pong(p)).await;
+                    let mut guard = self.sink.lock().await;
+                    if let Some(sink) = guard.as_mut() {
+                        let _ = sink.send(Message::Pong(p)).await;
+                    }
                     continue;
                 }
                 _ => continue,
@@ -125,7 +229,7 @@ impl AgentClient {
                 if let Some(pending) = self.pending.write().await.remove(&id) {
                     let result = if let Some(error) = value.get("error") {
                         Err(serde_json::from_value(error.clone()).unwrap_or_else(|_| {
-                            relayfs_protocol::RpcError::new(
+                            RpcError::new(
                                 relayfs_protocol::code::INTERNAL_ERROR,
                                 "malformed error response",
                             )
@@ -184,7 +288,7 @@ impl AgentClient {
         // Read loop ended: fail all pending requests.
         let pending = std::mem::take(&mut *self.pending.write().await);
         for (_, p) in pending {
-            let _ = p.tx.send(Err(relayfs_protocol::RpcError::new(
+            let _ = p.tx.send(Err(RpcError::new(
                 relayfs_protocol::code::AGENT_OFFLINE,
                 "connection to agent lost",
             )));
@@ -196,27 +300,36 @@ impl AgentClient {
         &self,
         method: &str,
         params: serde_json::Value,
-    ) -> Result<serde_json::Value, relayfs_protocol::RpcError> {
-        let id = self
-            .next_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let (tx, rx) = tokio::sync::oneshot::channel();
+    ) -> Result<serde_json::Value, RpcError> {
+        let id = self.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (tx, rx) = oneshot::channel();
         self.pending.write().await.insert(id, Pending { tx });
 
         let frame = relayfs_rpc::request_value(id, method, params);
         {
-            let mut sink = self.sink.lock().await;
-            if let Err(e) = sink.send(Message::Text(frame.to_string().into())).await {
-                self.pending.write().await.remove(&id);
-                return Err(relayfs_protocol::RpcError::new(
-                    relayfs_protocol::code::INTERNAL_ERROR,
-                    format!("send failed: {e}"),
-                ));
+            let mut guard = self.sink.lock().await;
+            match guard.as_mut() {
+                None => {
+                    self.pending.write().await.remove(&id);
+                    return Err(RpcError::new(
+                        relayfs_protocol::code::AGENT_OFFLINE,
+                        "relay connection offline (reconnecting)",
+                    ));
+                }
+                Some(sink) => {
+                    if let Err(e) = sink.send(Message::Text(frame.to_string().into())).await {
+                        self.pending.write().await.remove(&id);
+                        return Err(RpcError::new(
+                            relayfs_protocol::code::INTERNAL_ERROR,
+                            format!("send failed: {e}"),
+                        ));
+                    }
+                }
             }
         }
 
         rx.await.map_err(|_| {
-            relayfs_protocol::RpcError::new(
+            RpcError::new(
                 relayfs_protocol::code::AGENT_OFFLINE,
                 "connection to agent lost",
             )
@@ -228,23 +341,32 @@ impl AgentClient {
         &self,
         method: &str,
         params: serde_json::Value,
-        timeout: std::time::Duration,
-    ) -> Result<serde_json::Value, relayfs_protocol::RpcError> {
-        let id = self
-            .next_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let (tx, rx) = tokio::sync::oneshot::channel();
+        timeout: Duration,
+    ) -> Result<serde_json::Value, RpcError> {
+        let id = self.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (tx, rx) = oneshot::channel();
         self.pending.write().await.insert(id, Pending { tx });
 
         let frame = relayfs_rpc::request_value(id, method, params);
         {
-            let mut sink = self.sink.lock().await;
-            if let Err(e) = sink.send(Message::Text(frame.to_string().into())).await {
-                self.pending.write().await.remove(&id);
-                return Err(relayfs_protocol::RpcError::new(
-                    relayfs_protocol::code::INTERNAL_ERROR,
-                    format!("send failed: {e}"),
-                ));
+            let mut guard = self.sink.lock().await;
+            match guard.as_mut() {
+                None => {
+                    self.pending.write().await.remove(&id);
+                    return Err(RpcError::new(
+                        relayfs_protocol::code::AGENT_OFFLINE,
+                        "relay connection offline (reconnecting)",
+                    ));
+                }
+                Some(sink) => {
+                    if let Err(e) = sink.send(Message::Text(frame.to_string().into())).await {
+                        self.pending.write().await.remove(&id);
+                        return Err(RpcError::new(
+                            relayfs_protocol::code::INTERNAL_ERROR,
+                            format!("send failed: {e}"),
+                        ));
+                    }
+                }
             }
         }
 
@@ -252,14 +374,14 @@ impl AgentClient {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => {
                 self.pending.write().await.remove(&id);
-                Err(relayfs_protocol::RpcError::new(
+                Err(RpcError::new(
                     relayfs_protocol::code::AGENT_OFFLINE,
                     "connection to agent lost",
                 ))
             }
             Err(_) => {
                 self.pending.write().await.remove(&id);
-                Err(relayfs_protocol::RpcError::new(
+                Err(RpcError::new(
                     relayfs_protocol::code::CANCELLED,
                     "request timed out",
                 ))

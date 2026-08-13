@@ -110,10 +110,12 @@ full reference.
    / fsync, like a normal local disk). The mount lives on the mcp machine;
    the target only serves file operations.
 
-6. **Lifecycle.** The target reconnects automatically after a dropped
-   connection (default 5s). The mcp client fails pending requests with a
-   `target offline` error when the connection drops. Mounts are torn down
-   when the mcp process exits.
+6. **Lifecycle.** The relay pings every connected peer every 30s, so idle
+   connections survive intermediary idle timeouts (Cloudflare, nginx). Both
+   the target and the mcp client reconnect automatically after a dropped
+   connection (default 5s). Requests made during a reconnection window fail
+   fast with a `relay connection offline (reconnecting)` error; retry them.
+   Mounts are torn down when the mcp process exits.
 
 ## Caveats
 

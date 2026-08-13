@@ -180,6 +180,25 @@ async fn handle_connection(state: AppState, socket: WebSocket) {
         hello.kind, hello.id, session
     );
 
+    // Keepalive: ping every 30s so idle connections survive intermediary
+    // idle timeouts (e.g. Cloudflare closes idle WebSockets after ~100s).
+    // Both legs (agent and bridge) pass through such intermediaries, and the
+    // peer answers with a pong — real traffic on the wire keeps the path open.
+    {
+        let peer = peer.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                let mut sink = peer.sink.lock().await;
+                if sink.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
     // Read loop.
     loop {
         let Some(value) = read_frame(&mut stream).await else {

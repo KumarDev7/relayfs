@@ -54,6 +54,10 @@ pub async fn run(
         }
     }
 
+    // Keepalive is handled by the relay: it pings every connected peer every
+    // 30s, and we pong via the dispatch loop below — real traffic on the wire
+    // keeps the connection alive through intermediaries (Cloudflare, nginx).
+
     // Dispatch loop.
     while let Some(msg) = ws.next().await {
         let msg = match msg {
