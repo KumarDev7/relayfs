@@ -79,7 +79,9 @@ async fn main() -> anyhow::Result<()> {
         Some(Mode::Server) => {
             let args = ServerArgs::parse_from(&rest);
             tracing_subscriber::fmt()
-                .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+                .with_env_filter(
+                    EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+                )
                 .with_writer(std::io::stderr)
                 .init();
             relayfs_relay::run(&args.listen, args.token.as_deref()).await
@@ -87,7 +89,9 @@ async fn main() -> anyhow::Result<()> {
         Some(Mode::Target) => {
             let args = TargetArgs::parse_from(&rest);
             tracing_subscriber::fmt()
-                .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+                .with_env_filter(
+                    EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+                )
                 .with_writer(std::io::stderr)
                 .init();
             relayfs_agent::run(
@@ -103,7 +107,9 @@ async fn main() -> anyhow::Result<()> {
             let args = McpArgs::parse_from(&rest);
             // Logs to stderr: MCP protocol is spoken on stdout.
             tracing_subscriber::fmt()
-                .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+                .with_env_filter(
+                    EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+                )
                 .with_writer(std::io::stderr)
                 .init();
             relayfs_bridge::run(&args.base_url, &args.token, &args.id, &args.name).await

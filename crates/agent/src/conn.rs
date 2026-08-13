@@ -5,7 +5,7 @@ use std::sync::Arc;
 use futures::{SinkExt, StreamExt};
 use relayfs_protocol::{Hello, PeerKind};
 use tokio::net::TcpStream;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
+use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use tracing::{error, info, warn};
 
 use crate::AgentState;
@@ -75,7 +75,8 @@ pub async fn run(
             }
             tokio_tungstenite::tungstenite::Message::Close(_) => break,
             tokio_tungstenite::tungstenite::Message::Ping(p) => {
-                ws.send(tokio_tungstenite::tungstenite::Message::Pong(p)).await?;
+                ws.send(tokio_tungstenite::tungstenite::Message::Pong(p))
+                    .await?;
             }
             _ => {}
         }
@@ -87,7 +88,11 @@ pub async fn run(
 }
 
 /// Dispatch one JSON-RPC request from the bridge.
-async fn dispatch(ws: &mut WsStream, state: &AgentState, value: serde_json::Value) -> anyhow::Result<()> {
+async fn dispatch(
+    ws: &mut WsStream,
+    state: &AgentState,
+    value: serde_json::Value,
+) -> anyhow::Result<()> {
     let Some(id) = value.get("id").and_then(|v| v.as_u64()) else {
         // Notifications from the bridge: none defined yet.
         return Ok(());
@@ -97,7 +102,10 @@ async fn dispatch(ws: &mut WsStream, state: &AgentState, value: serde_json::Valu
         .and_then(|m| m.as_str())
         .unwrap_or("")
         .to_string();
-    let params = value.get("params").cloned().unwrap_or(serde_json::Value::Null);
+    let params = value
+        .get("params")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
 
     // Transparency: log every request the agent executes, with its arguments.
     tracing::info!("executing {method}: {}", params);
@@ -119,13 +127,11 @@ async fn dispatch(ws: &mut WsStream, state: &AgentState, value: serde_json::Valu
         relayfs_protocol::method::SYMLINK => crate::files::symlink(params).await,
         relayfs_protocol::method::CHMOD => crate::files::chmod(params).await,
         relayfs_protocol::method::STREAM_FILE => crate::files::stream_file(ws, id, params).await,
-        relayfs_protocol::method::PING => {
-            Ok(serde_json::to_value(relayfs_protocol::PingResult {
-                ok: true,
-                hostname: hostname(),
-                pid: std::process::id(),
-            })?)
-        }
+        relayfs_protocol::method::PING => Ok(serde_json::to_value(relayfs_protocol::PingResult {
+            ok: true,
+            hostname: hostname(),
+            pid: std::process::id(),
+        })?),
         other => {
             let err = relayfs_protocol::RpcError::new(
                 relayfs_protocol::code::METHOD_NOT_FOUND,

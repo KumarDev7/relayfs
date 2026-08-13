@@ -11,7 +11,7 @@ pub mod mcp;
 
 use std::sync::Arc;
 
-use rmcp::{ServiceExt, transport::stdio};
+use rmcp::{transport::stdio, ServiceExt};
 
 /// Run the bridge: connect to the relay, pair with the agent, and serve MCP
 /// over stdio until the process is terminated.

@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use axum::{
     extract::{
-        State,
         ws::{Message, WebSocket, WebSocketUpgrade},
+        State,
     },
     response::IntoResponse,
     routing::get,
@@ -87,7 +87,9 @@ async fn ws_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> impl
 }
 
 /// Read one text frame; returns `None` on close. Binary frames are rejected.
-async fn read_frame(stream: &mut futures::stream::SplitStream<WebSocket>) -> Option<serde_json::Value> {
+async fn read_frame(
+    stream: &mut futures::stream::SplitStream<WebSocket>,
+) -> Option<serde_json::Value> {
     loop {
         let msg = stream.next().await?;
         match msg {
@@ -157,7 +159,12 @@ async fn handle_connection(state: AppState, socket: WebSocket) {
 
     // Ack.
     let agent_id = if hello.kind == PeerKind::Bridge {
-        state.agents.read().await.get(&token).map(|p| p.hello.id.clone())
+        state
+            .agents
+            .read()
+            .await
+            .get(&token)
+            .map(|p| p.hello.id.clone())
     } else {
         None
     };
@@ -168,7 +175,10 @@ async fn handle_connection(state: AppState, socket: WebSocket) {
     });
     let _ = peer.send_text(&ack.to_string()).await;
 
-    info!("{:?} {} connected (session {})", hello.kind, hello.id, session);
+    info!(
+        "{:?} {} connected (session {})",
+        hello.kind, hello.id, session
+    );
 
     // Read loop.
     loop {
@@ -276,7 +286,13 @@ async fn forward_to_agent(state: &AppState, token: &str, value: &serde_json::Val
 }
 
 async fn forward_to_bridges(state: &AppState, token: &str, value: &serde_json::Value) {
-    let bridges = state.bridges.read().await.get(token).cloned().unwrap_or_default();
+    let bridges = state
+        .bridges
+        .read()
+        .await
+        .get(token)
+        .cloned()
+        .unwrap_or_default();
     for bridge in bridges {
         if let Err(e) = bridge.send_text(&value.to_string()).await {
             error!("forward to bridge failed: {e}");

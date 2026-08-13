@@ -18,3 +18,6 @@ tokio-tungstenite.workspace = true
 rand.workspace = true
 relayfs-protocol = { path = "../protocol" }
 relayfs-rpc = { path = "../rpc" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

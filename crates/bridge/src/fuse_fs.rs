@@ -12,10 +12,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use fuser::{
-    AccessFlags, Config, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags,
-    Generation, INodeNo, LockOwner, MountOption, OpenFlags, RenameFlags, ReplyAttr, ReplyCreate,
-    ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite,
-    ReplyXattr, Request, SessionACL, TimeOrNow, WriteFlags, spawn_mount,
+    spawn_mount, AccessFlags, Config, Errno, FileAttr, FileHandle, FileType, Filesystem,
+    FopenFlags, Generation, INodeNo, LockOwner, MountOption, OpenFlags, RenameFlags, ReplyAttr,
+    ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs,
+    ReplyWrite, ReplyXattr, Request, SessionACL, TimeOrNow, WriteFlags,
 };
 use relayfs_protocol::{FileKind, RpcError};
 use tokio::sync::Mutex;
@@ -38,7 +38,11 @@ impl InodeMap {
         let mut by_path = HashMap::new();
         by_ino.insert(1, root.clone());
         by_path.insert(root, 1);
-        Self { next: 2, by_ino, by_path }
+        Self {
+            next: 2,
+            by_ino,
+            by_path,
+        }
     }
 
     fn path(&self, ino: INodeNo) -> Option<PathBuf> {
@@ -78,7 +82,8 @@ impl RemoteFs {
 
     /// Resolve an inode to a remote path.
     fn path_for(&self, ino: INodeNo) -> Option<PathBuf> {
-        self.rt.block_on(async { self.inodes.lock().await.path(ino) })
+        self.rt
+            .block_on(async { self.inodes.lock().await.path(ino) })
     }
 
     /// Resolve `parent/name` to a remote path, registering the inode.
@@ -93,11 +98,7 @@ impl RemoteFs {
     }
 
     /// RPC with a timeout; maps errors to Errno.
-    fn rpc(
-        &self,
-        method: &str,
-        params: serde_json::Value,
-    ) -> Result<serde_json::Value, Errno> {
+    fn rpc(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value, Errno> {
         // Transparency: every kernel operation on the mount becomes an RPC to
         // the target — log it so mount activity is visible in bridge logs.
         tracing::info!("fuse {method}: {}", params);
@@ -112,13 +113,14 @@ impl RemoteFs {
             relayfs_protocol::method::STAT,
             serde_json::json!({ "path": path.to_string_lossy() }),
         )?;
-        let stat: relayfs_protocol::StatResult = serde_json::from_value(result)
-            .map_err(|_| Errno::EIO)?;
+        let stat: relayfs_protocol::StatResult =
+            serde_json::from_value(result).map_err(|_| Errno::EIO)?;
         Ok(attr_from_stat(stat, self.ino_for_path(path)))
     }
 
     fn ino_for_path(&self, path: &Path) -> u64 {
-        self.rt.block_on(async { self.inodes.lock().await.ino_for(path) })
+        self.rt
+            .block_on(async { self.inodes.lock().await.ino_for(path) })
     }
 }
 
@@ -162,9 +164,9 @@ fn errno_for(e: &RpcError) -> Errno {
         Errno::ENOTDIR
     } else if msg.contains("is a directory") {
         Errno::EISDIR
-    } else if msg.contains("timed out") || msg.contains("offline") {
-        Errno::EIO
     } else {
+        // Timeouts, offline agent, and anything unrecognized surface as a
+        // generic filesystem error so editors show a save/read failure.
         Errno::EIO
     }
 }
@@ -604,9 +606,9 @@ impl Filesystem for RemoteFs {
                         ];
                         for (_, kind, name) in entries {
                             let child = path.join(&name);
-                            let child_ino = self.rt.block_on(async {
-                                self.inodes.lock().await.ino_for(&child)
-                            });
+                            let child_ino = self
+                                .rt
+                                .block_on(async { self.inodes.lock().await.ino_for(&child) });
                             all.push((child_ino, kind, name));
                         }
 
@@ -740,7 +742,13 @@ impl Filesystem for RemoteFs {
             return;
         }
         match self.remote_attr(&path) {
-            Ok(attr) => reply.created(&TTL, &attr, Generation(0), FileHandle(0), FopenFlags::empty()),
+            Ok(attr) => reply.created(
+                &TTL,
+                &attr,
+                Generation(0),
+                FileHandle(0),
+                FopenFlags::empty(),
+            ),
             Err(e) => reply.error(e),
         }
     }
@@ -754,7 +762,10 @@ pub struct MountManager {
 
 impl MountManager {
     pub fn new(client: Arc<AgentClient>) -> Self {
-        Self { client, mounts: Mutex::new(HashMap::new()) }
+        Self {
+            client,
+            mounts: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Mount `remote_dir` at local `mount_point`.
@@ -784,11 +795,7 @@ impl MountManager {
         std::fs::create_dir_all(&mount_path)
             .map_err(|e| format!("create mount point {}: {e}", mount_path.display()))?;
 
-        let fs = RemoteFs::new(
-            self.client.clone(),
-            PathBuf::from(remote_dir),
-            read_only,
-        );
+        let fs = RemoteFs::new(self.client.clone(), PathBuf::from(remote_dir), read_only);
 
         let mut config = Config::default();
         config.mount_options = vec![
@@ -799,8 +806,8 @@ impl MountManager {
         config.n_threads = Some(4);
         config.clone_fd = true;
 
-        let session = spawn_mount(fs, &mount_path, &config)
-            .map_err(|e| format!("mount failed: {e}"))?;
+        let session =
+            spawn_mount(fs, &mount_path, &config).map_err(|e| format!("mount failed: {e}"))?;
 
         self.mounts
             .lock()

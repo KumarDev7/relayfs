@@ -72,10 +72,18 @@ pub struct RpcError {
 
 impl RpcError {
     pub fn new(code: i64, message: impl Into<String>) -> Self {
-        Self { code, message: message.into(), data: None }
+        Self {
+            code,
+            message: message.into(),
+            data: None,
+        }
     }
     pub fn with_data(code: i64, message: impl Into<String>, data: serde_json::Value) -> Self {
-        Self { code, message: message.into(), data: Some(data) }
+        Self {
+            code,
+            message: message.into(),
+            data: Some(data),
+        }
     }
 }
 
@@ -385,4 +393,71 @@ pub struct CommandFinishedNotification {
 pub struct MountGoneNotification {
     pub mount_point: String,
     pub reason: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hello_round_trips() {
+        let hello = Hello {
+            kind: PeerKind::Agent,
+            id: "agent-1".into(),
+            name: "prod".into(),
+            token: Some("secret".into()),
+        };
+        let json = serde_json::to_string(&hello).unwrap();
+        let back: Hello = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.kind, PeerKind::Agent);
+        assert_eq!(back.id, "agent-1");
+        assert_eq!(back.token.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn hello_without_token_round_trips() {
+        let hello = Hello {
+            kind: PeerKind::Bridge,
+            id: "bridge-1".into(),
+            name: "local".into(),
+            token: None,
+        };
+        let json = serde_json::to_string(&hello).unwrap();
+        assert!(!json.contains("token"));
+        let back: Hello = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.kind, PeerKind::Bridge);
+        assert!(back.token.is_none());
+    }
+
+    #[test]
+    fn run_command_params_input_round_trips() {
+        let params = RunCommandParams {
+            command: "read x && echo $x".into(),
+            cwd: Some("/tmp".into()),
+            env: None,
+            timeout_secs: Some(5),
+            input: Some("hello\n".into()),
+        };
+        let json = serde_json::to_string(&params).unwrap();
+        let back: RunCommandParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.input.as_deref(), Some("hello\n"));
+        assert_eq!(back.timeout_secs, Some(5));
+    }
+
+    #[test]
+    fn run_command_params_input_defaults_to_none() {
+        let back: RunCommandParams = serde_json::from_str(r#"{"command": "ls"}"#).unwrap();
+        assert_eq!(back.command, "ls");
+        assert!(back.input.is_none());
+        assert!(back.cwd.is_none());
+        assert!(back.timeout_secs.is_none());
+    }
+
+    #[test]
+    fn rpc_error_serializes_code_and_message() {
+        let err = RpcError::new(crate::code::METHOD_NOT_FOUND, "unknown method: foo");
+        let json = serde_json::to_value(&err).unwrap();
+        assert_eq!(json["code"], crate::code::METHOD_NOT_FOUND);
+        assert_eq!(json["message"], "unknown method: foo");
+    }
 }

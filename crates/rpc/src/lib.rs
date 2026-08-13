@@ -7,15 +7,13 @@
 use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
-use relayfs_protocol::{
-    Hello, HelloAck, Notification, Request, Response, RpcError, SessionId,
-};
+use relayfs_protocol::{Hello, HelloAck, Notification, Request, Response, RpcError, SessionId};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream,
     tungstenite::{Error as WsError, Message},
+    MaybeTlsStream, WebSocketStream,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -40,7 +38,12 @@ impl Peer {
     }
 
     /// Send a JSON-RPC request and wait for the matching response.
-    pub async fn request(&self, id: u64, method: &str, params: serde_json::Value) -> Result<serde_json::Value, RpcError> {
+    pub async fn request(
+        &self,
+        id: u64,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, RpcError> {
         let frame = serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -48,7 +51,10 @@ impl Peer {
             "params": params,
         });
         self.send_text(&frame.to_string()).await.map_err(|e| {
-            RpcError::new(relayfs_protocol::code::INTERNAL_ERROR, format!("send failed: {e}"))
+            RpcError::new(
+                relayfs_protocol::code::INTERNAL_ERROR,
+                format!("send failed: {e}"),
+            )
         })?;
         // The read loop (run by the caller) routes responses into a channel;
         // this helper is only used for fire-and-forget sends.
@@ -66,7 +72,12 @@ impl Peer {
     }
 
     /// Send a raw JSON-RPC response.
-    pub async fn respond(&self, id: u64, result: Option<serde_json::Value>, error: Option<RpcError>) -> Result<(), WsError> {
+    pub async fn respond(
+        &self,
+        id: u64,
+        result: Option<serde_json::Value>,
+        error: Option<RpcError>,
+    ) -> Result<(), WsError> {
         let mut frame = serde_json::json!({ "jsonrpc": "2.0", "id": id });
         if let Some(result) = result {
             frame["result"] = result;
@@ -153,7 +164,11 @@ pub fn notification_value(method: &str, params: serde_json::Value) -> serde_json
 }
 
 /// Build a JSON-RPC response value.
-pub fn response_value(id: u64, result: Option<serde_json::Value>, error: Option<RpcError>) -> serde_json::Value {
+pub fn response_value(
+    id: u64,
+    result: Option<serde_json::Value>,
+    error: Option<RpcError>,
+) -> serde_json::Value {
     let mut value = serde_json::json!({ "jsonrpc": "2.0", "id": id });
     if let Some(result) = result {
         value["result"] = result;
@@ -174,5 +189,62 @@ pub fn relay_ws_url(base: &str) -> String {
         trimmed.to_string()
     } else {
         format!("{trimmed}/ws")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relay_ws_url_appends_ws() {
+        assert_eq!(relay_ws_url("ws://host:8787"), "ws://host:8787/ws");
+        assert_eq!(
+            relay_ws_url("wss://relay.example.com"),
+            "wss://relay.example.com/ws"
+        );
+        assert_eq!(relay_ws_url("ws://host:8787/"), "ws://host:8787/ws");
+    }
+
+    #[test]
+    fn relay_ws_url_keeps_existing_ws_path() {
+        assert_eq!(relay_ws_url("ws://host:8787/ws"), "ws://host:8787/ws");
+        assert_eq!(relay_ws_url("ws://host:8787/ws/"), "ws://host:8787/ws");
+    }
+
+    #[test]
+    fn request_value_frames_correctly() {
+        let v = request_value(7, "ping", serde_json::json!({}));
+        assert_eq!(v["jsonrpc"], "2.0");
+        assert_eq!(v["id"], 7);
+        assert_eq!(v["method"], "ping");
+        assert_eq!(v["params"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn notification_value_has_no_id() {
+        let v = notification_value("command_output", serde_json::json!({"data": "x"}));
+        assert_eq!(v["jsonrpc"], "2.0");
+        assert_eq!(v["method"], "command_output");
+        assert!(v.get("id").is_none());
+    }
+
+    #[test]
+    fn response_value_round_trips_result_and_error() {
+        let ok = response_value(1, Some(serde_json::json!({"ok": true})), None);
+        assert_eq!(ok["result"]["ok"], true);
+        assert!(ok.get("error").is_none());
+
+        let err = response_value(
+            2,
+            None,
+            Some(RpcError::new(
+                relayfs_protocol::code::AGENT_OFFLINE,
+                "agent is not connected",
+            )),
+        );
+        assert_eq!(err["error"]["code"], relayfs_protocol::code::AGENT_OFFLINE);
+        assert_eq!(err["error"]["message"], "agent is not connected");
+        assert!(err.get("result").is_none());
     }
 }

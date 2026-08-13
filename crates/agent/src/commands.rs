@@ -13,8 +13,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tracing::warn;
 
+use crate::conn::{send_notification, send_response, WsStream};
 use crate::AgentState;
-use crate::conn::{WsStream, send_notification, send_response};
 
 /// A running command tracked in `AgentState.commands`.
 pub struct RunningCommand {
@@ -55,9 +55,9 @@ pub async fn run_command(
         }
     }
 
-    let mut child = cmd.spawn().map_err(|e| {
-        anyhow::anyhow!("failed to spawn `{}`: {e}", params.command)
-    })?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("failed to spawn `{}`: {e}", params.command))?;
 
     // Feed the provided input, then close stdin so the child sees EOF.
     if let Some(input) = &params.input {
@@ -72,7 +72,11 @@ pub async fn run_command(
     let stderr = child.stderr.take().expect("stderr piped");
 
     // Track the child so it can be killed on disconnect.
-    state.commands.lock().await.insert(id, RunningCommand { child });
+    state
+        .commands
+        .lock()
+        .await
+        .insert(id, RunningCommand { child });
 
     let mut output = String::new();
     let mut stdout_lines = BufReader::new(stdout).lines();

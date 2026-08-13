@@ -15,3 +15,6 @@ futures.workspace = true
 tokio-tungstenite.workspace = true
 tracing.workspace = true
 relayfs-protocol = { path = "../protocol" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

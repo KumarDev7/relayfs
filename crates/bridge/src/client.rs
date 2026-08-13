@@ -7,9 +7,7 @@ use futures::{SinkExt, StreamExt};
 use relayfs_protocol::{Hello, PeerKind};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, RwLock};
-use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message,
-};
+use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 use tracing::{info, warn};
 
 pub type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -32,7 +30,12 @@ pub struct AgentClient {
 }
 
 impl AgentClient {
-    pub async fn connect(base_url: &str, token: &str, id: &str, name: &str) -> anyhow::Result<Self> {
+    pub async fn connect(
+        base_url: &str,
+        token: &str,
+        id: &str,
+        name: &str,
+    ) -> anyhow::Result<Self> {
         let url = relayfs_rpc::relay_ws_url(base_url);
         let (ws, _) = connect_async(&url).await?;
         info!("connected to relay {url}");
@@ -100,12 +103,7 @@ impl AgentClient {
                 Message::Text(t) => t,
                 Message::Close(_) => break,
                 Message::Ping(p) => {
-                    let _ = self
-                        .sink
-                        .lock()
-                        .await
-                        .send(Message::Pong(p))
-                        .await;
+                    let _ = self.sink.lock().await.send(Message::Pong(p)).await;
                     continue;
                 }
                 _ => continue,
@@ -130,7 +128,10 @@ impl AgentClient {
                             )
                         }))
                     } else {
-                        Ok(value.get("result").cloned().unwrap_or(serde_json::Value::Null))
+                        Ok(value
+                            .get("result")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null))
                     };
                     let _ = pending.tx.send(result);
                 }
@@ -193,7 +194,9 @@ impl AgentClient {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, relayfs_protocol::RpcError> {
-        let id = self.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.pending.write().await.insert(id, Pending { tx });
 
@@ -224,7 +227,9 @@ impl AgentClient {
         params: serde_json::Value,
         timeout: std::time::Duration,
     ) -> Result<serde_json::Value, relayfs_protocol::RpcError> {
-        let id = self.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.pending.write().await.insert(id, Pending { tx });
 

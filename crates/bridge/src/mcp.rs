@@ -3,10 +3,8 @@
 use std::sync::Arc;
 
 use rmcp::{
-    ErrorData as McpError, RoleServer, ServerHandler,
-    handler::server::wrapper::Parameters,
-    model::*,
-    schemars, service::RequestContext, tool, tool_handler, tool_router,
+    handler::server::wrapper::Parameters, model::*, schemars, service::RequestContext, tool,
+    tool_handler, tool_router, ErrorData as McpError, RoleServer, ServerHandler,
 };
 use serde::Deserialize;
 
@@ -159,7 +157,7 @@ impl RelayfsServer {
             .await
             .map_err(|e| Self::err(e.message))?;
         let result: relayfs_protocol::RunCommandResult =
-            serde_json::from_value(result).map_err(|e| Self::err(e))?;
+            serde_json::from_value(result).map_err(Self::err)?;
         tracing::info!(
             "run_command finished: exit_code={:?}, timed_out={}",
             result.exit_code,
@@ -203,7 +201,7 @@ impl RelayfsServer {
             .await
             .map_err(|e| Self::err(e.message))?;
         let result: relayfs_protocol::ReadFileResult =
-            serde_json::from_value(result).map_err(|e| Self::err(e))?;
+            serde_json::from_value(result).map_err(Self::err)?;
         Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::json!({ "data": result.data, "eof": result.eof }).to_string(),
         )]))
@@ -235,10 +233,11 @@ impl RelayfsServer {
             .await
             .map_err(|e| Self::err(e.message))?;
         let result: relayfs_protocol::WriteFileResult =
-            serde_json::from_value(result).map_err(|e| Self::err(e))?;
-        Ok(CallToolResult::success(vec![ContentBlock::text(
-            format!("wrote {} bytes", result.bytes_written),
-        )]))
+            serde_json::from_value(result).map_err(Self::err)?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            "wrote {} bytes",
+            result.bytes_written
+        ))]))
     }
 
     /// List a directory on the remote machine.
@@ -257,7 +256,7 @@ impl RelayfsServer {
             .await
             .map_err(|e| Self::err(e.message))?;
         let result: relayfs_protocol::ListDirResult =
-            serde_json::from_value(result).map_err(|e| Self::err(e))?;
+            serde_json::from_value(result).map_err(Self::err)?;
         let mut lines = Vec::new();
         for entry in &result.entries {
             let kind = match entry.kind {
@@ -390,12 +389,17 @@ impl RelayfsServer {
             args.read_only.unwrap_or(false)
         );
         self.mounts
-            .mount(&args.remote_dir, &args.mount_point, args.read_only.unwrap_or(false))
+            .mount(
+                &args.remote_dir,
+                &args.mount_point,
+                args.read_only.unwrap_or(false),
+            )
             .await
-            .map_err(|e| Self::err(e))?;
-        Ok(CallToolResult::success(vec![ContentBlock::text(
-            format!("mounted {} at {}", args.remote_dir, args.mount_point),
-        )]))
+            .map_err(Self::err)?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            "mounted {} at {}",
+            args.remote_dir, args.mount_point
+        ))]))
     }
 
     /// Unmount a remote directory from the local filesystem.
@@ -408,8 +412,10 @@ impl RelayfsServer {
         self.mounts
             .unmount(&args.mount_point)
             .await
-            .map_err(|e| Self::err(e))?;
-        Ok(CallToolResult::success(vec![ContentBlock::text("unmounted")]))
+            .map_err(Self::err)?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            "unmounted",
+        )]))
     }
 
     /// List active mounts.

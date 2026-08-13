@@ -9,14 +9,14 @@ use relayfs_protocol::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::conn::{WsStream, send_notification};
+use crate::conn::{send_notification, WsStream};
 
 pub async fn read_file(params: serde_json::Value) -> anyhow::Result<serde_json::Value> {
     let params: ReadFileParams = serde_json::from_value(params)?;
     let path = PathBuf::from(&params.path);
-    let mut file = tokio::fs::File::open(&path).await.map_err(|e| {
-        anyhow::anyhow!("open {}: {e}", path.display())
-    })?;
+    let mut file = tokio::fs::File::open(&path)
+        .await
+        .map_err(|e| anyhow::anyhow!("open {}: {e}", path.display()))?;
 
     let offset = params.offset.unwrap_or(0);
     let limit = params.limit.unwrap_or(1024 * 1024);
@@ -41,16 +41,16 @@ pub async fn write_file(params: serde_json::Value) -> anyhow::Result<serde_json:
 
     if params.create_dirs.unwrap_or(false) {
         if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                anyhow::anyhow!("create dirs {}: {e}", parent.display())
-            })?;
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| anyhow::anyhow!("create dirs {}: {e}", parent.display()))?;
         }
     }
 
     let data = base64_decode(&params.data)?;
-    let mut file = tokio::fs::File::create(&path).await.map_err(|e| {
-        anyhow::anyhow!("create {}: {e}", path.display())
-    })?;
+    let mut file = tokio::fs::File::create(&path)
+        .await
+        .map_err(|e| anyhow::anyhow!("create {}: {e}", path.display()))?;
     file.write_all(&data).await?;
     file.flush().await?;
 
@@ -64,9 +64,9 @@ pub async fn list_dir(params: serde_json::Value) -> anyhow::Result<serde_json::V
     let path = PathBuf::from(&params.path);
 
     let mut entries = Vec::new();
-    let mut rd = tokio::fs::read_dir(&path).await.map_err(|e| {
-        anyhow::anyhow!("read_dir {}: {e}", path.display())
-    })?;
+    let mut rd = tokio::fs::read_dir(&path)
+        .await
+        .map_err(|e| anyhow::anyhow!("read_dir {}: {e}", path.display()))?;
     while let Some(entry) = rd.next_entry().await? {
         let name = entry.file_name().to_string_lossy().into_owned();
         let meta = match entry.metadata().await {
@@ -104,9 +104,9 @@ pub async fn stat(params: serde_json::Value) -> anyhow::Result<serde_json::Value
     let params: StatParams = serde_json::from_value(params)?;
     let path = PathBuf::from(&params.path);
 
-    let meta = tokio::fs::symlink_metadata(&path).await.map_err(|e| {
-        anyhow::anyhow!("stat {}: {e}", path.display())
-    })?;
+    let meta = tokio::fs::symlink_metadata(&path)
+        .await
+        .map_err(|e| anyhow::anyhow!("stat {}: {e}", path.display()))?;
 
     let kind = if meta.is_dir() {
         FileKind::Dir
@@ -119,7 +119,10 @@ pub async fn stat(params: serde_json::Value) -> anyhow::Result<serde_json::Value
     };
 
     let link_target = if kind == FileKind::Symlink {
-        tokio::fs::read_link(&path).await.ok().map(|p| p.to_string_lossy().into_owned())
+        tokio::fs::read_link(&path)
+            .await
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned())
     } else {
         None
     };
@@ -159,15 +162,16 @@ pub async fn mkdir(params: serde_json::Value) -> anyhow::Result<serde_json::Valu
     {
         let mut builder = tokio::fs::DirBuilder::new();
         builder.mode(mode);
-        builder.create(&path).await.map_err(|e| {
-            anyhow::anyhow!("mkdir {}: {e}", path.display())
-        })?;
+        builder
+            .create(&path)
+            .await
+            .map_err(|e| anyhow::anyhow!("mkdir {}: {e}", path.display()))?;
     }
     #[cfg(not(unix))]
     {
-        tokio::fs::create_dir(&path).await.map_err(|e| {
-            anyhow::anyhow!("mkdir {}: {e}", path.display())
-        })?;
+        tokio::fs::create_dir(&path)
+            .await
+            .map_err(|e| anyhow::anyhow!("mkdir {}: {e}", path.display()))?;
     }
     Ok(serde_json::Value::Null)
 }
@@ -177,21 +181,21 @@ pub async fn remove(params: serde_json::Value) -> anyhow::Result<serde_json::Val
     let path = PathBuf::from(&params.path);
 
     if params.recursive.unwrap_or(false) {
-        tokio::fs::remove_dir_all(&path).await.map_err(|e| {
-            anyhow::anyhow!("remove {}: {e}", path.display())
-        })?;
+        tokio::fs::remove_dir_all(&path)
+            .await
+            .map_err(|e| anyhow::anyhow!("remove {}: {e}", path.display()))?;
     } else {
-        let meta = tokio::fs::symlink_metadata(&path).await.map_err(|e| {
-            anyhow::anyhow!("remove {}: {e}", path.display())
-        })?;
+        let meta = tokio::fs::symlink_metadata(&path)
+            .await
+            .map_err(|e| anyhow::anyhow!("remove {}: {e}", path.display()))?;
         if meta.is_dir() {
-            tokio::fs::remove_dir(&path).await.map_err(|e| {
-                anyhow::anyhow!("remove {}: {e}", path.display())
-            })?;
+            tokio::fs::remove_dir(&path)
+                .await
+                .map_err(|e| anyhow::anyhow!("remove {}: {e}", path.display()))?;
         } else {
-            tokio::fs::remove_file(&path).await.map_err(|e| {
-                anyhow::anyhow!("remove {}: {e}", path.display())
-            })?;
+            tokio::fs::remove_file(&path)
+                .await
+                .map_err(|e| anyhow::anyhow!("remove {}: {e}", path.display()))?;
         }
     }
     Ok(serde_json::Value::Null)
@@ -199,9 +203,9 @@ pub async fn remove(params: serde_json::Value) -> anyhow::Result<serde_json::Val
 
 pub async fn rename(params: serde_json::Value) -> anyhow::Result<serde_json::Value> {
     let params: RenameParams = serde_json::from_value(params)?;
-    tokio::fs::rename(&params.from, &params.to).await.map_err(|e| {
-        anyhow::anyhow!("rename {} -> {}: {e}", params.from, params.to)
-    })?;
+    tokio::fs::rename(&params.from, &params.to)
+        .await
+        .map_err(|e| anyhow::anyhow!("rename {} -> {}: {e}", params.from, params.to))?;
     Ok(serde_json::Value::Null)
 }
 
@@ -240,9 +244,8 @@ pub async fn symlink(params: serde_json::Value) -> anyhow::Result<serde_json::Va
     let params: relayfs_protocol::SymlinkParams = serde_json::from_value(params)?;
     #[cfg(unix)]
     {
-        std::os::unix::fs::symlink(&params.target, &params.link).map_err(|e| {
-            anyhow::anyhow!("symlink {} -> {}: {e}", params.link, params.target)
-        })?;
+        std::os::unix::fs::symlink(&params.target, &params.link)
+            .map_err(|e| anyhow::anyhow!("symlink {} -> {}: {e}", params.link, params.target))?;
     }
     #[cfg(not(unix))]
     {
@@ -273,9 +276,9 @@ pub async fn copy(params: serde_json::Value) -> anyhow::Result<serde_json::Value
     let from = PathBuf::from(&params.from);
     let to = PathBuf::from(&params.to);
 
-    let meta = tokio::fs::symlink_metadata(&from).await.map_err(|e| {
-        anyhow::anyhow!("copy {}: {e}", from.display())
-    })?;
+    let meta = tokio::fs::symlink_metadata(&from)
+        .await
+        .map_err(|e| anyhow::anyhow!("copy {}: {e}", from.display()))?;
 
     if meta.is_dir() {
         if !params.recursive.unwrap_or(false) {
@@ -289,9 +292,8 @@ pub async fn copy(params: serde_json::Value) -> anyhow::Result<serde_json::Value
         if let Some(parent) = to.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::copy(&from, &to).map_err(|e| {
-            anyhow::anyhow!("copy {} -> {}: {e}", from.display(), to.display())
-        })?;
+        std::fs::copy(&from, &to)
+            .map_err(|e| anyhow::anyhow!("copy {} -> {}: {e}", from.display(), to.display()))?;
     }
     Ok(serde_json::Value::Null)
 }
@@ -320,9 +322,9 @@ pub async fn stream_file(
 ) -> anyhow::Result<serde_json::Value> {
     let params: ReadFileParams = serde_json::from_value(params)?;
     let path = PathBuf::from(&params.path);
-    let mut file = tokio::fs::File::open(&path).await.map_err(|e| {
-        anyhow::anyhow!("open {}: {e}", path.display())
-    })?;
+    let mut file = tokio::fs::File::open(&path)
+        .await
+        .map_err(|e| anyhow::anyhow!("open {}: {e}", path.display()))?;
 
     use tokio::io::AsyncReadExt;
     let mut buf = vec![0u8; 256 * 1024];
