@@ -18,10 +18,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
-            artifact: relayfs-x86_64-unknown-linux-gnu
-          - target: aarch64-unknown-linux-gnu
-            artifact: relayfs-aarch64-unknown-linux-gnu
+          - target: x86_64-unknown-linux-musl
+            artifact: relayfs-x86_64-unknown-linux-musl
+          - target: aarch64-unknown-linux-musl
+            artifact: relayfs-aarch64-unknown-linux-musl
     steps:
       - uses: actions/checkout@v4
 
@@ -30,16 +30,21 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # Static musl builds run on any Linux regardless of glibc version
+      # (GitHub's ubuntu-latest runners build against glibc 2.39, which
+      # rejects older distros). zig + cargo-zigbuild cross-link cleanly and
+      # handle the ring crate's C sources.
+      - name: Install zig and cargo-zigbuild
+        uses: taiki-e/install-action@v2
+        with:
+          tool: zig, cargo-zigbuild
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
 
-      - name: Install cross-compilation linker (aarch64)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
-
-      - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
+      - name: Build release binary (static musl)
+        run: cargo zigbuild --release --target ${{ matrix.target }}
 
       - name: Package binary
         run: |
