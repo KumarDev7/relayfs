@@ -197,7 +197,7 @@ pub async fn run_command(
 /// Kill all running commands (called on disconnect).
 pub async fn kill_all(state: &AgentState) {
     let mut commands = state.commands.lock().await;
-    for (_, running) in commands.iter_mut() {
+    for running in commands.values_mut() {
         let _ = running.child.kill().await;
     }
     commands.clear();
