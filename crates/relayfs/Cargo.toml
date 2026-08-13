@@ -1,0 +1,21 @@
+[package]
+name = "relayfs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "One binary, three modes: server (relay), target (agent), mcp (bridge)"
+
+[[bin]]
+name = "relayfs"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+relayfs-relay = { path = "../relay" }
+relayfs-agent = { path = "../agent" }
+relayfs-bridge = { path = "../bridge" }
+relayfs-skill = { path = "../skill" }

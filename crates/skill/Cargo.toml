@@ -1,0 +1,6 @@
+[package]
+name = "relayfs-skill"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The relayfs skill document, printed by the `skill` subcommand"

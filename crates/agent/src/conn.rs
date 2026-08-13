@@ -1,0 +1,181 @@
+//! Agent connection loop: connect to the relay, handshake, dispatch requests.
+
+use std::sync::Arc;
+
+use futures::{SinkExt, StreamExt};
+use relayfs_protocol::{Hello, PeerKind};
+use tokio::net::TcpStream;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
+use tracing::{error, info, warn};
+
+use crate::AgentState;
+
+pub type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+pub async fn run(
+    base_url: &str,
+    token: &str,
+    id: &str,
+    name: &str,
+    state: Arc<AgentState>,
+) -> anyhow::Result<()> {
+    let url = relayfs_rpc::relay_ws_url(base_url);
+    let (ws, _) = connect_async(&url).await?;
+    info!("connected to relay {url}");
+    let mut ws = ws;
+
+    // Handshake.
+    let hello = Hello {
+        kind: PeerKind::Agent,
+        id: id.to_string(),
+        name: name.to_string(),
+        token: Some(token.to_string()),
+    };
+    ws.send(tokio_tungstenite::tungstenite::Message::Text(
+        serde_json::to_string(&hello)?.into(),
+    ))
+    .await?;
+
+    // Wait for hello_ack.
+    loop {
+        let Some(msg) = ws.next().await else {
+            return Ok(());
+        };
+        let msg = msg?;
+        if let tokio_tungstenite::tungstenite::Message::Text(text) = msg {
+            let value: serde_json::Value = serde_json::from_str(&text)?;
+            if value.get("method").and_then(|m| m.as_str()) == Some("hello_ack") {
+                info!("handshake complete: {}", value);
+                break;
+            }
+        }
+    }
+
+    // Dispatch loop.
+    while let Some(msg) = ws.next().await {
+        let msg = match msg {
+            Ok(m) => m,
+            Err(e) => {
+                warn!("ws error: {e}");
+                break;
+            }
+        };
+        match msg {
+            tokio_tungstenite::tungstenite::Message::Text(text) => {
+                let value: serde_json::Value = match serde_json::from_str(&text) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        warn!("invalid frame: {e}");
+                        continue;
+                    }
+                };
+                if let Err(e) = crate::conn::dispatch(&mut ws, &state, value).await {
+                    error!("dispatch error: {e}");
+                }
+            }
+            tokio_tungstenite::tungstenite::Message::Close(_) => break,
+            tokio_tungstenite::tungstenite::Message::Ping(p) => {
+                ws.send(tokio_tungstenite::tungstenite::Message::Pong(p)).await?;
+            }
+            _ => {}
+        }
+    }
+
+    // Kill any commands still running for this session.
+    crate::commands::kill_all(&state).await;
+    Ok(())
+}
+
+/// Dispatch one JSON-RPC request from the bridge.
+async fn dispatch(ws: &mut WsStream, state: &AgentState, value: serde_json::Value) -> anyhow::Result<()> {
+    let Some(id) = value.get("id").and_then(|v| v.as_u64()) else {
+        // Notifications from the bridge: none defined yet.
+        return Ok(());
+    };
+    let method = value
+        .get("method")
+        .and_then(|m| m.as_str())
+        .unwrap_or("")
+        .to_string();
+    let params = value.get("params").cloned().unwrap_or(serde_json::Value::Null);
+
+    // Transparency: log every request the agent executes, with its arguments.
+    tracing::info!("executing {method}: {}", params);
+
+    let result = match method.as_str() {
+        relayfs_protocol::method::RUN_COMMAND => {
+            crate::commands::run_command(ws, state, id, params).await
+        }
+        relayfs_protocol::method::READ_FILE => crate::files::read_file(params).await,
+        relayfs_protocol::method::WRITE_FILE => crate::files::write_file(params).await,
+        relayfs_protocol::method::LIST_DIR => crate::files::list_dir(params).await,
+        relayfs_protocol::method::STAT => crate::files::stat(params).await,
+        relayfs_protocol::method::MKDIR => crate::files::mkdir(params).await,
+        relayfs_protocol::method::REMOVE => crate::files::remove(params).await,
+        relayfs_protocol::method::RENAME => crate::files::rename(params).await,
+        relayfs_protocol::method::COPY => crate::files::copy(params).await,
+        relayfs_protocol::method::WRITE_AT => crate::files::write_at(params).await,
+        relayfs_protocol::method::TRUNCATE => crate::files::truncate(params).await,
+        relayfs_protocol::method::SYMLINK => crate::files::symlink(params).await,
+        relayfs_protocol::method::CHMOD => crate::files::chmod(params).await,
+        relayfs_protocol::method::STREAM_FILE => crate::files::stream_file(ws, id, params).await,
+        relayfs_protocol::method::PING => {
+            Ok(serde_json::to_value(relayfs_protocol::PingResult {
+                ok: true,
+                hostname: hostname(),
+                pid: std::process::id(),
+            })?)
+        }
+        other => {
+            let err = relayfs_protocol::RpcError::new(
+                relayfs_protocol::code::METHOD_NOT_FOUND,
+                format!("unknown method: {other}"),
+            );
+            send_response(ws, id, None, Some(err)).await?;
+            return Ok(());
+        }
+    };
+
+    match result {
+        Ok(result) => send_response(ws, id, Some(result), None).await?,
+        Err(e) => {
+            let err = relayfs_protocol::RpcError::new(
+                relayfs_protocol::code::INTERNAL_ERROR,
+                e.to_string(),
+            );
+            send_response(ws, id, None, Some(err)).await?;
+        }
+    }
+    Ok(())
+}
+
+pub async fn send_response(
+    ws: &mut WsStream,
+    id: u64,
+    result: Option<serde_json::Value>,
+    error: Option<relayfs_protocol::RpcError>,
+) -> anyhow::Result<()> {
+    let value = relayfs_rpc::response_value(id, result, error);
+    ws.send(tokio_tungstenite::tungstenite::Message::Text(
+        value.to_string().into(),
+    ))
+    .await?;
+    Ok(())
+}
+
+pub async fn send_notification(
+    ws: &mut WsStream,
+    method: &str,
+    params: serde_json::Value,
+) -> anyhow::Result<()> {
+    let value = relayfs_rpc::notification_value(method, params);
+    ws.send(tokio_tungstenite::tungstenite::Message::Text(
+        value.to_string().into(),
+    ))
+    .await?;
+    Ok(())
+}
+
+fn hostname() -> String {
+    std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown".into())
+}

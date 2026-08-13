@@ -1,0 +1,53 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/protocol",
+    "crates/rpc",
+    "crates/skill",
+    "crates/relay",
+    "crates/agent",
+    "crates/bridge",
+    "crates/relayfs",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/yourname/relayfs"
+
+[workspace.dependencies]
+# protocol
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+
+# async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+futures = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# mcp
+rmcp = { version = "3.1", features = ["server", "client", "macros", "schemars", "transport-io"] }
+
+# websocket
+tokio-tungstenite = "0.30"
+
+# http server
+axum = { version = "0.8", features = ["ws"] }
+
+# cli
+clap = { version = "4", features = ["derive", "env"] }
+
+# misc
+rand = "0.9"
+base64 = "0.22"
+sha2 = "0.10"
+hex = "0.4"
+notify = "8"
+fuser = "0.18"
+nix = { version = "0.31", features = ["process", "term", "fs", "signal"] }
+libc = "0.2"

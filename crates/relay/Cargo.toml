@@ -1,0 +1,20 @@
+[package]
+name = "relayfs-relay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Public relay server: pairs bridge and agent over WebSocket (library)"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+futures.workspace = true
+tracing.workspace = true
+axum.workspace = true
+tokio-tungstenite.workspace = true
+rand.workspace = true
+relayfs-protocol = { path = "../protocol" }
+relayfs-rpc = { path = "../rpc" }
