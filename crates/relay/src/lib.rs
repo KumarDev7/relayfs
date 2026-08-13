@@ -263,8 +263,22 @@ async fn handle_connection(state: AppState, socket: WebSocket) {
     // Cleanup.
     match hello.kind {
         PeerKind::Agent => {
-            state.agents.write().await.remove(&token);
-            notify_bridges_agent_gone(&state, &token, &hello.id).await;
+            // Only remove the registration if it still points at this peer;
+            // a newer agent may have replaced us (its own cleanup owns the
+            // entry then).
+            let removed = {
+                let mut agents = state.agents.write().await;
+                match agents.get(&token) {
+                    Some(current) if Arc::ptr_eq(current, &peer) => {
+                        agents.remove(&token);
+                        true
+                    }
+                    _ => false,
+                }
+            };
+            if removed {
+                notify_bridges_agent_gone(&state, &token, &hello.id).await;
+            }
             info!("agent {} disconnected", hello.id);
         }
         PeerKind::Bridge => {
@@ -280,6 +294,10 @@ async fn register_agent(state: &AppState, token: &str, peer: Arc<RelayPeer>) {
     let mut agents = state.agents.write().await;
     if let Some(old) = agents.insert(token.to_string(), peer.clone()) {
         warn!("agent {} replaced by {}", old.hello.id, peer.hello.id);
+        // Close the displaced connection so it doesn't linger as a zombie;
+        // its cleanup will see it is no longer the registered agent.
+        let mut sink = old.sink.lock().await;
+        let _ = sink.send(Message::Close(None)).await;
     }
     drop(agents);
     let value = serde_json::json!({

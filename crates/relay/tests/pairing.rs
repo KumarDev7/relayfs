@@ -151,6 +151,108 @@ async fn rejects_wrong_token() {
 }
 
 #[tokio::test]
+async fn replacing_agent_closes_old_and_keeps_new() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let relay = tokio::spawn(async move {
+        relayfs_relay::run(&format!("127.0.0.1:{port}"), Some(TOKEN))
+            .await
+            .unwrap();
+    });
+
+    // First agent connects.
+    let mut agent_a = connect(
+        port,
+        Hello {
+            kind: PeerKind::Agent,
+            id: "agent-a".into(),
+            name: "a".into(),
+            token: Some(TOKEN.into()),
+        },
+    )
+    .await;
+    let _ = recv_json(&mut agent_a).await; // hello_ack
+
+    // A second agent with the same token replaces it: the relay must close
+    // the displaced connection so it doesn't linger as a zombie.
+    let mut agent_b = connect(
+        port,
+        Hello {
+            kind: PeerKind::Agent,
+            id: "agent-b".into(),
+            name: "b".into(),
+            token: Some(TOKEN.into()),
+        },
+    )
+    .await;
+    let _ = recv_json(&mut agent_b).await; // hello_ack
+                                           // The relay must close the displaced connection (skipping keepalive
+                                           // pings that may arrive first).
+    let displaced_closed = loop {
+        match agent_a.next().await {
+            Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break true,
+            Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => continue,
+            other => {
+                panic!("expected displaced agent to be closed, got {other:?}")
+            }
+        }
+    };
+    assert!(displaced_closed, "expected displaced agent to be closed");
+    // Give the relay time to run the displaced connection's cleanup; its
+    // stale cleanup must NOT remove the new agent.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // A bridge sees agent-b, and requests route to it.
+    let mut bridge = connect(
+        port,
+        Hello {
+            kind: PeerKind::Bridge,
+            id: "test-bridge".into(),
+            name: "bridge".into(),
+            token: Some(TOKEN.into()),
+        },
+    )
+    .await;
+    let ack: HelloAck =
+        serde_json::from_value(recv_json(&mut bridge).await["params"].clone()).unwrap();
+    assert_eq!(ack.agent_id.as_deref(), Some("agent-b"));
+
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "ping",
+        "params": {},
+    });
+    bridge
+        .send(Message::Text(request.to_string().into()))
+        .await
+        .unwrap();
+    let received = recv_json(&mut agent_b).await;
+    assert_eq!(received["id"], 1);
+
+    // When agent-b leaves, requests must start failing with AGENT_OFFLINE.
+    drop(agent_b);
+    let mut saw_offline = false;
+    for _ in 0..100 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        bridge
+            .send(Message::Text(request.to_string().into()))
+            .await
+            .unwrap();
+        let response = recv_json(&mut bridge).await;
+        if let Some(code) = response.get("error").and_then(|e| e.get("code")) {
+            assert_eq!(code, relayfs_protocol::code::AGENT_OFFLINE);
+            saw_offline = true;
+            break;
+        }
+    }
+    assert!(saw_offline, "expected AGENT_OFFLINE after agent-b left");
+
+    relay.abort();
+}
+
+#[tokio::test]
 async fn answers_agent_offline_when_no_agent() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
