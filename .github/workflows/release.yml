@@ -34,10 +34,10 @@ jobs:
       # (GitHub's ubuntu-latest runners build against glibc 2.39, which
       # rejects older distros). zig + cargo-zigbuild cross-link cleanly and
       # handle the ring crate's C sources.
-      - name: Install zig and cargo-zigbuild
-        uses: taiki-e/install-action@v2
+      - uses: taiki-e/setup-zig-action@v2
+      - uses: taiki-e/install-action@v2
         with:
-          tool: zig, cargo-zigbuild
+          tool: cargo-zigbuild
 
       - uses: Swatinem/rust-cache@v2
         with:
