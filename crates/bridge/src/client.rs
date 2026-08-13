@@ -15,9 +15,7 @@ use futures::{SinkExt, StreamExt};
 use relayfs_protocol::{Hello, PeerKind, RpcError};
 use tokio::net::TcpStream;
 use tokio::sync::{oneshot, Mutex, RwLock};
-use tokio_tungstenite::{
-    connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream,
-};
+use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 use tracing::{info, warn};
 
 pub type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -96,7 +94,10 @@ impl AgentClient {
             match Self::open_connection(self).await {
                 Ok((sink, stream)) => {
                     *self.sink.lock().await = Some(sink);
-                    info!("connected to relay, agent: {:?}", self.agent_id.lock().await);
+                    info!(
+                        "connected to relay, agent: {:?}",
+                        self.agent_id.lock().await
+                    );
 
                     let (end_tx, end_rx) = oneshot::channel();
                     {
@@ -112,11 +113,8 @@ impl AgentClient {
                         // (Cloudflare, nginx) don't close the idle connection.
                         let ping_sink = self.sink.clone();
                         tokio::spawn(async move {
-                            let mut tick =
-                                tokio::time::interval(Duration::from_secs(25));
-                            tick.set_missed_tick_behavior(
-                                tokio::time::MissedTickBehavior::Skip,
-                            );
+                            let mut tick = tokio::time::interval(Duration::from_secs(25));
+                            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                             loop {
                                 tick.tick().await;
                                 let mut guard = ping_sink.lock().await;
@@ -301,7 +299,9 @@ impl AgentClient {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, RpcError> {
-        let id = self.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.pending.write().await.insert(id, Pending { tx });
 
@@ -343,7 +343,9 @@ impl AgentClient {
         params: serde_json::Value,
         timeout: Duration,
     ) -> Result<serde_json::Value, RpcError> {
-        let id = self.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.pending.write().await.insert(id, Pending { tx });
 
