@@ -97,7 +97,11 @@ full reference.
    input. stdout and stderr are streamed live to the mcp client — nothing is
    printed to the target's terminal. Commands that prompt for input (e.g.
    `read`, interactive installers) consume the `input` argument as their
-   stdin, then see EOF. On disconnect, all running commands are killed. A
+   stdin, then see EOF. On disconnect, all running commands are killed.
+   `timeout_secs` kills the command on the target after N seconds;
+   `request_timeout_secs` bounds how long the mcp side waits for the response
+   (default 5 minutes, 0 = no limit — the command keeps running on the target
+   after a wait timeout). A
    timed-out command is killed and reported. Both sides log every command:
    the mcp side logs the call and its completion (exit code / timeout), the
    target logs what it executes and when it finishes.
