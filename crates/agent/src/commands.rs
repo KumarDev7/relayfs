@@ -13,7 +13,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tracing::warn;
 
-use crate::conn::{send_notification, send_response, WsStream};
+use crate::conn::{send_notification, send_response, WsSink};
 use crate::AgentState;
 
 /// A running command tracked in `AgentState.commands`.
@@ -23,7 +23,7 @@ pub struct RunningCommand {
 
 /// Run a command, streaming output, and reply when it exits.
 pub async fn run_command(
-    ws: &mut WsStream,
+    sink: &WsSink,
     state: &AgentState,
     id: u64,
     params: serde_json::Value,
@@ -95,7 +95,7 @@ pub async fn run_command(
                             output.push_str(&line);
                             output.push('\n');
                             send_notification(
-                                ws,
+                                sink,
                                 relayfs_protocol::notify::COMMAND_OUTPUT,
                                 serde_json::to_value(CommandOutputNotification {
                                     id,
@@ -117,7 +117,7 @@ pub async fn run_command(
                             output.push_str(&line);
                             output.push('\n');
                             send_notification(
-                                ws,
+                                sink,
                                 relayfs_protocol::notify::COMMAND_OUTPUT,
                                 serde_json::to_value(CommandOutputNotification {
                                     id,
@@ -175,7 +175,7 @@ pub async fn run_command(
 
     // Final notification, then the response.
     send_notification(
-        ws,
+        sink,
         relayfs_protocol::notify::COMMAND_FINISHED,
         serde_json::to_value(CommandFinishedNotification {
             id,
@@ -190,7 +190,7 @@ pub async fn run_command(
         timed_out,
         output,
     };
-    send_response(ws, id, Some(serde_json::to_value(result)?), None).await?;
+    send_response(sink, id, Some(serde_json::to_value(result)?), None).await?;
     Ok(serde_json::Value::Null)
 }
 

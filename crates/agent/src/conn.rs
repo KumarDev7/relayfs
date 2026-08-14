@@ -5,12 +5,17 @@ use std::sync::Arc;
 use futures::{SinkExt, StreamExt};
 use relayfs_protocol::{Hello, PeerKind};
 use tokio::net::TcpStream;
+use tokio::sync::Mutex;
+use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use tracing::{error, info, warn};
 
 use crate::AgentState;
 
 pub type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
+/// Shared write half of the WebSocket. Requests run as spawned tasks, so they
+/// share the sink instead of owning `&mut WsStream` (which is not `Clone`).
+pub type WsSink = Arc<Mutex<futures::stream::SplitSink<WsStream, Message>>>;
 
 pub async fn run(
     base_url: &str,
@@ -34,10 +39,8 @@ pub async fn run(
         name: name.to_string(),
         token: Some(token.to_string()),
     };
-    ws.send(tokio_tungstenite::tungstenite::Message::Text(
-        serde_json::to_string(&hello)?.into(),
-    ))
-    .await?;
+    ws.send(Message::Text(serde_json::to_string(&hello)?.into()))
+        .await?;
 
     // Wait for hello_ack.
     loop {
@@ -45,7 +48,7 @@ pub async fn run(
             return Ok(());
         };
         let msg = msg?;
-        if let tokio_tungstenite::tungstenite::Message::Text(text) = msg {
+        if let Message::Text(text) = msg {
             let value: serde_json::Value = serde_json::from_str(&text)?;
             if value.get("method").and_then(|m| m.as_str()) == Some("hello_ack") {
                 info!("handshake complete: {}", value);
@@ -55,11 +58,18 @@ pub async fn run(
     }
 
     // Keepalive is handled by the relay: it pings every connected peer every
-    // 30s, and we pong via the dispatch loop below — real traffic on the wire
-    // keeps the connection alive through intermediaries (Cloudflare, nginx).
+    // 30s, and we pong in the read loop below — real traffic on the wire keeps
+    // the connection alive through intermediaries (Cloudflare, nginx).
 
-    // Dispatch loop.
-    while let Some(msg) = ws.next().await {
+    // Split into reader/writer. The writer is shared: every request runs in
+    // its own spawned task so one long-running command (a multi-minute
+    // training script, a slow file copy) never blocks pongs, keepalives, or
+    // other requests. The read loop only parses frames and spawns; it never
+    // awaits handler completion.
+    let (sink, mut stream) = ws.split();
+    let sink: WsSink = Arc::new(Mutex::new(sink));
+
+    while let Some(msg) = stream.next().await {
         let msg = match msg {
             Ok(m) => m,
             Err(e) => {
@@ -68,7 +78,7 @@ pub async fn run(
             }
         };
         match msg {
-            tokio_tungstenite::tungstenite::Message::Text(text) => {
+            Message::Text(text) => {
                 let value: serde_json::Value = match serde_json::from_str(&text) {
                     Ok(v) => v,
                     Err(e) => {
@@ -76,14 +86,17 @@ pub async fn run(
                         continue;
                     }
                 };
-                if let Err(e) = crate::conn::dispatch(&mut ws, &state, value).await {
-                    error!("dispatch error: {e}");
-                }
+                let sink = sink.clone();
+                let state = state.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = dispatch(&sink, &state, value).await {
+                        error!("dispatch error: {e}");
+                    }
+                });
             }
-            tokio_tungstenite::tungstenite::Message::Close(_) => break,
-            tokio_tungstenite::tungstenite::Message::Ping(p) => {
-                ws.send(tokio_tungstenite::tungstenite::Message::Pong(p))
-                    .await?;
+            Message::Close(_) => break,
+            Message::Ping(p) => {
+                sink.lock().await.send(Message::Pong(p)).await?;
             }
             _ => {}
         }
@@ -94,9 +107,11 @@ pub async fn run(
     Ok(())
 }
 
-/// Dispatch one JSON-RPC request from the bridge.
+/// Dispatch one JSON-RPC request from the bridge. Runs inside a spawned task;
+/// long-running handlers must not hold the sink lock while waiting (each
+/// `send_*` acquires it only for the single frame write).
 async fn dispatch(
-    ws: &mut WsStream,
+    sink: &WsSink,
     state: &AgentState,
     value: serde_json::Value,
 ) -> anyhow::Result<()> {
@@ -119,7 +134,7 @@ async fn dispatch(
 
     let result = match method.as_str() {
         relayfs_protocol::method::RUN_COMMAND => {
-            crate::commands::run_command(ws, state, id, params).await
+            crate::commands::run_command(sink, state, id, params).await
         }
         relayfs_protocol::method::READ_FILE => crate::files::read_file(params).await,
         relayfs_protocol::method::WRITE_FILE => crate::files::write_file(params).await,
@@ -133,7 +148,7 @@ async fn dispatch(
         relayfs_protocol::method::TRUNCATE => crate::files::truncate(params).await,
         relayfs_protocol::method::SYMLINK => crate::files::symlink(params).await,
         relayfs_protocol::method::CHMOD => crate::files::chmod(params).await,
-        relayfs_protocol::method::STREAM_FILE => crate::files::stream_file(ws, id, params).await,
+        relayfs_protocol::method::STREAM_FILE => crate::files::stream_file(sink, id, params).await,
         relayfs_protocol::method::PING => Ok(serde_json::to_value(relayfs_protocol::PingResult {
             ok: true,
             hostname: hostname(),
@@ -144,48 +159,48 @@ async fn dispatch(
                 relayfs_protocol::code::METHOD_NOT_FOUND,
                 format!("unknown method: {other}"),
             );
-            send_response(ws, id, None, Some(err)).await?;
+            send_response(sink, id, None, Some(err)).await?;
             return Ok(());
         }
     };
 
     match result {
-        Ok(result) => send_response(ws, id, Some(result), None).await?,
+        Ok(result) => send_response(sink, id, Some(result), None).await?,
         Err(e) => {
             let err = relayfs_protocol::RpcError::new(
                 relayfs_protocol::code::INTERNAL_ERROR,
                 e.to_string(),
             );
-            send_response(ws, id, None, Some(err)).await?;
+            send_response(sink, id, None, Some(err)).await?;
         }
     }
     Ok(())
 }
 
 pub async fn send_response(
-    ws: &mut WsStream,
+    sink: &WsSink,
     id: u64,
     result: Option<serde_json::Value>,
     error: Option<relayfs_protocol::RpcError>,
 ) -> anyhow::Result<()> {
     let value = relayfs_rpc::response_value(id, result, error);
-    ws.send(tokio_tungstenite::tungstenite::Message::Text(
-        value.to_string().into(),
-    ))
-    .await?;
+    sink.lock()
+        .await
+        .send(Message::Text(value.to_string().into()))
+        .await?;
     Ok(())
 }
 
 pub async fn send_notification(
-    ws: &mut WsStream,
+    sink: &WsSink,
     method: &str,
     params: serde_json::Value,
 ) -> anyhow::Result<()> {
     let value = relayfs_rpc::notification_value(method, params);
-    ws.send(tokio_tungstenite::tungstenite::Message::Text(
-        value.to_string().into(),
-    ))
-    .await?;
+    sink.lock()
+        .await
+        .send(Message::Text(value.to_string().into()))
+        .await?;
     Ok(())
 }
 

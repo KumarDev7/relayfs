@@ -9,7 +9,7 @@ use relayfs_protocol::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::conn::{send_notification, WsStream};
+use crate::conn::{send_notification, WsSink};
 
 pub async fn read_file(params: serde_json::Value) -> anyhow::Result<serde_json::Value> {
     let params: ReadFileParams = serde_json::from_value(params)?;
@@ -316,7 +316,7 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> anyhow::Result<()> {
 
 /// Stream a file's contents in chunks as `stream_chunk` notifications.
 pub async fn stream_file(
-    ws: &mut WsStream,
+    sink: &WsSink,
     id: u64,
     params: serde_json::Value,
 ) -> anyhow::Result<serde_json::Value> {
@@ -336,7 +336,7 @@ pub async fn stream_file(
         }
         total += n as u64;
         send_notification(
-            ws,
+            sink,
             "stream_chunk",
             serde_json::json!({
                 "id": id,
@@ -346,7 +346,7 @@ pub async fn stream_file(
         .await?;
     }
     send_notification(
-        ws,
+        sink,
         "stream_end",
         serde_json::json!({ "id": id, "total": total }),
     )
