@@ -19,7 +19,7 @@ flowchart LR
 - **`--mode mcp`** — MCP server on your machine. Exposes the remote machine
   as MCP tools (`run_command`, `read_file`, `write_file`, `list_dir`, `stat`,
   `mkdir`, `remove`, `rename`, `copy`, `mount_remote`, `unmount_remote`,
-  `list_mounts`, `ping`). Also hosts the FUSE mount.
+  `list_mounts`, `ping`, `list_targets`). Also hosts the FUSE mount.
 - **`--mode target`** — daemon on the remote machine. Executes shell commands
   (streaming output live), serves file operations, and answers FUSE requests.
 

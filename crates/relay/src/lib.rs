@@ -38,6 +38,8 @@ struct AppState {
 struct RelayPeer {
     sink: Arc<Mutex<futures::stream::SplitSink<WebSocket, Message>>>,
     hello: Hello,
+    /// Relay-assigned session id, reported to bridges via `list_targets`.
+    session: String,
 }
 
 impl RelayPeer {
@@ -150,6 +152,7 @@ async fn handle_connection(state: AppState, socket: WebSocket) {
     let peer = Arc::new(RelayPeer {
         sink: sink.clone(),
         hello: hello.clone(),
+        session: session.clone(),
     });
 
     match hello.kind {
@@ -222,6 +225,28 @@ async fn handle_connection(state: AppState, socket: WebSocket) {
                 }
                 if is_notification {
                     forward_to_agent(&state, &token, &value).await;
+                    continue;
+                }
+                // Relay-local methods: answered by the relay itself, not
+                // forwarded to the agent. The relay is the only component
+                // that sees every connected target.
+                if value.get("method").and_then(|m| m.as_str())
+                    == Some(relayfs_protocol::method::LIST_TARGETS)
+                {
+                    let id = value.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let agents = state.agents.read().await;
+                    let targets: Vec<relayfs_protocol::TargetInfo> = agents
+                        .values()
+                        .map(|p| relayfs_protocol::TargetInfo {
+                            id: p.hello.id.clone(),
+                            name: p.hello.name.clone(),
+                            session: p.session.clone(),
+                        })
+                        .collect();
+                    let result =
+                        serde_json::to_value(relayfs_protocol::ListTargetsResult { targets })
+                            .unwrap_or_default();
+                    let _ = peer.respond(id, Some(result), None).await;
                     continue;
                 }
                 // Request: route to the agent; if offline, answer with an error.

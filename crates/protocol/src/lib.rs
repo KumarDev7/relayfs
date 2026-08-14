@@ -145,6 +145,10 @@ pub mod method {
     pub const LIST_MOUNTS: &str = "list_mounts";
     /// Agent health check.
     pub const PING: &str = "ping";
+    /// List all targets connected to the relay. Answered by the relay
+    /// itself (it is the only component that sees every agent), not
+    /// forwarded to the paired agent.
+    pub const LIST_TARGETS: &str = "list_targets";
 }
 
 /// Notifications emitted by the agent.
@@ -368,6 +372,22 @@ pub struct PingResult {
     pub ok: bool,
     pub hostname: String,
     pub pid: u32,
+}
+
+/// One connected target (agent), as reported by the relay.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TargetInfo {
+    /// Agent id chosen at startup.
+    pub id: String,
+    /// Human-readable name shown in relay logs.
+    pub name: String,
+    /// Relay-assigned session id.
+    pub session: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListTargetsResult {
+    pub targets: Vec<TargetInfo>,
 }
 
 // ---------------------------------------------------------------------------

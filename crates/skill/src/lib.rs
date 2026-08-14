@@ -56,7 +56,7 @@ full reference.
 
 ## MCP tools (mcp mode)
 
-13 tools:
+14 tools:
 
 | Tool             | Purpose                                                        |
 |------------------|----------------------------------------------------------------|
@@ -73,6 +73,7 @@ full reference.
 | unmount_remote   | tear down a mount                                              |
 | list_mounts      | list active mounts                                            |
 | ping             | target health check                                            |
+| list_targets     | list all targets connected to the relay (answered by the relay) |
 
 ## Working principles
 

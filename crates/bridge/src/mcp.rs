@@ -445,6 +445,35 @@ impl RelayfsServer {
             result.to_string(),
         )]))
     }
+
+    /// List all targets connected to the relay.
+    #[tool(description = "List all targets (agents) currently connected to the relay")]
+    async fn list_targets(&self) -> Result<CallToolResult, McpError> {
+        tracing::info!("mcp call list_targets");
+        let result = self
+            .client
+            .call(
+                relayfs_protocol::method::LIST_TARGETS,
+                serde_json::json!({}),
+            )
+            .await
+            .map_err(|e| Self::err(e.message))?;
+        let result: relayfs_protocol::ListTargetsResult =
+            serde_json::from_value(result).map_err(Self::err)?;
+        if result.targets.is_empty() {
+            return Ok(CallToolResult::success(vec![ContentBlock::text(
+                "no targets connected",
+            )]));
+        }
+        let lines: Vec<String> = result
+            .targets
+            .iter()
+            .map(|t| format!("{} (name={}, session={})", t.id, t.name, t.session))
+            .collect();
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            lines.join("\n"),
+        )]))
+    }
 }
 
 #[tool_handler]
