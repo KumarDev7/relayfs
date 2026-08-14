@@ -1140,7 +1140,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "relayfs"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1155,7 +1155,7 @@ dependencies = [
 
 [[package]]
 name = "relayfs-agent"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1174,7 +1174,7 @@ dependencies = [
 
 [[package]]
 name = "relayfs-bridge"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1194,7 +1194,7 @@ dependencies = [
 
 [[package]]
 name = "relayfs-protocol"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1203,7 +1203,7 @@ dependencies = [
 
 [[package]]
 name = "relayfs-relay"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1222,7 +1222,7 @@ dependencies = [
 
 [[package]]
 name = "relayfs-rpc"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "futures",
  "relayfs-protocol",
@@ -1238,7 +1238,7 @@ dependencies = [
 
 [[package]]
 name = "relayfs-skill"
-version = "0.3.1"
+version = "0.4.0"
 
 [[package]]
 name = "ring"
