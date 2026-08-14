@@ -27,6 +27,11 @@ pub struct RunCommandArgs {
     /// only bounds how long the bridge waits for the response.
     #[serde(default)]
     pub request_timeout_secs: Option<u64>,
+    /// Wait for the command to finish and return its output (default true).
+    /// When false, the call returns an `execution_id` immediately and the
+    /// command keeps running; fetch the result with `get_command_result`.
+    #[serde(default)]
+    pub wait: Option<bool>,
     /// Text written to the command's stdin before it starts reading.
     /// Use for commands that prompt for input (e.g. `read`, interactive
     /// installers). The command sees this as its stdin, then EOF.
@@ -117,6 +122,18 @@ pub struct UnmountArgs {
     pub mount_point: String,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetCommandResultArgs {
+    /// Execution id returned by `run_command` with `wait: false`.
+    pub execution_id: u64,
+    /// Return only the first N lines of output.
+    #[serde(default)]
+    pub head: Option<usize>,
+    /// Return only the last N lines of output.
+    #[serde(default)]
+    pub tail: Option<usize>,
+}
+
 /// The relayfs MCP server.
 pub struct RelayfsServer {
     client: Arc<AgentClient>,
@@ -156,6 +173,7 @@ impl RelayfsServer {
             "cwd": args.cwd,
             "timeout_secs": args.timeout_secs,
             "input": args.input,
+            "wait": args.wait,
         });
         // Wait bound: default 5 minutes, 0 = no limit. The command itself
         // keeps running on the target either way; this only bounds how long
@@ -179,10 +197,22 @@ impl RelayfsServer {
         let result: relayfs_protocol::RunCommandResult =
             serde_json::from_value(result).map_err(Self::err)?;
         tracing::info!(
-            "run_command finished: exit_code={:?}, timed_out={}",
+            "run_command finished: exit_code={:?}, timed_out={}, execution_id={:?}",
             result.exit_code,
-            result.timed_out
+            result.timed_out,
+            result.execution_id
         );
+
+        // Fire-and-forget mode: return the execution id for get_command_result.
+        if let Some(execution_id) = result.execution_id {
+            return Ok(CallToolResult::success(vec![ContentBlock::text(
+                serde_json::json!({
+                    "execution_id": execution_id,
+                    "status": "running",
+                })
+                .to_string(),
+            )]));
+        }
 
         let mut text = result.output;
         if result.timed_out {
@@ -493,6 +523,49 @@ impl RelayfsServer {
         Ok(CallToolResult::success(vec![ContentBlock::text(
             lines.join("\n"),
         )]))
+    }
+
+    /// Fetch the result of a command started with `wait: false`.
+    #[tool(
+        description = "Fetch the result of a command started with wait=false, by its execution_id"
+    )]
+    async fn get_command_result(
+        &self,
+        Parameters(args): Parameters<GetCommandResultArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        tracing::info!(
+            "mcp call get_command_result: execution_id={} (head={:?}, tail={:?})",
+            args.execution_id,
+            args.head,
+            args.tail
+        );
+        let result = self
+            .client
+            .call(
+                relayfs_protocol::method::GET_COMMAND_RESULT,
+                serde_json::json!({
+                    "execution_id": args.execution_id,
+                    "head": args.head,
+                    "tail": args.tail,
+                }),
+            )
+            .await
+            .map_err(|e| Self::err(e.message))?;
+        let result: relayfs_protocol::GetCommandResult =
+            serde_json::from_value(result).map_err(Self::err)?;
+        let mut text = result.output;
+        if result.done {
+            if result.timed_out.unwrap_or(false) {
+                text.push_str("\n[command timed out]");
+            } else if let Some(code) = result.exit_code {
+                if code != 0 {
+                    text.push_str(&format!("\n[exit code: {code}]"));
+                }
+            }
+        } else {
+            text.push_str("\n[still running]");
+        }
+        Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
     }
 }
 

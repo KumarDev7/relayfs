@@ -112,7 +112,7 @@ pub async fn run(
 /// `send_*` acquires it only for the single frame write).
 async fn dispatch(
     sink: &WsSink,
-    state: &AgentState,
+    state: &Arc<AgentState>,
     value: serde_json::Value,
 ) -> anyhow::Result<()> {
     let Some(id) = value.get("id").and_then(|v| v.as_u64()) else {
@@ -149,6 +149,9 @@ async fn dispatch(
         relayfs_protocol::method::SYMLINK => crate::files::symlink(params).await,
         relayfs_protocol::method::CHMOD => crate::files::chmod(params).await,
         relayfs_protocol::method::STREAM_FILE => crate::files::stream_file(sink, id, params).await,
+        relayfs_protocol::method::GET_COMMAND_RESULT => {
+            crate::commands::get_command_result(state, params).await
+        }
         relayfs_protocol::method::PING => Ok(serde_json::to_value(relayfs_protocol::PingResult {
             ok: true,
             hostname: hostname(),

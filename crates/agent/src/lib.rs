@@ -17,6 +17,8 @@ pub struct AgentState {
     pub token: String,
     /// Running commands: request id -> child.
     pub commands: Mutex<std::collections::HashMap<u64, commands::RunningCommand>>,
+    /// Finished commands (started with `wait: false`): request id -> result.
+    pub results: Mutex<std::collections::HashMap<u64, commands::CommandResult>>,
 }
 
 impl AgentState {
@@ -24,6 +26,7 @@ impl AgentState {
         Self {
             token,
             commands: Mutex::new(std::collections::HashMap::new()),
+            results: Mutex::new(std::collections::HashMap::new()),
         }
     }
 }

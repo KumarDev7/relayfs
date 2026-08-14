@@ -56,7 +56,7 @@ full reference.
 
 ## MCP tools (mcp mode)
 
-14 tools:
+15 tools:
 
 | Tool             | Purpose                                                        |
 |------------------|----------------------------------------------------------------|
@@ -74,6 +74,7 @@ full reference.
 | list_mounts      | list active mounts                                            |
 | ping             | target health check                                            |
 | list_targets     | list all targets connected to the relay (answered by the relay) |
+| get_command_result | fetch a command's result by execution_id (head/tail options)  |
 
 ## Working principles
 
@@ -101,7 +102,10 @@ full reference.
    `timeout_secs` kills the command on the target after N seconds;
    `request_timeout_secs` bounds how long the mcp side waits for the response
    (default 5 minutes, 0 = no limit — the command keeps running on the target
-   after a wait timeout). A
+   after a wait timeout). `wait: false` returns an `execution_id` immediately
+   and the command runs in the background; `get_command_result` fetches the
+   result by that id (with optional `head`/`tail` line limits, applied in
+   that order). A
    timed-out command is killed and reported. Both sides log every command:
    the mcp side logs the call and its completion (exit code / timeout), the
    target logs what it executes and when it finishes.

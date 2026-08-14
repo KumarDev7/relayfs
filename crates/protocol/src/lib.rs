@@ -149,6 +149,9 @@ pub mod method {
     /// itself (it is the only component that sees every agent), not
     /// forwarded to the paired agent.
     pub const LIST_TARGETS: &str = "list_targets";
+    /// Fetch the result of a command started with `wait: false`, by its
+    /// execution id; params: `get_command_result` request.
+    pub const GET_COMMAND_RESULT: &str = "get_command_result";
 }
 
 /// Notifications emitted by the agent.
@@ -182,6 +185,11 @@ pub struct RunCommandParams {
     /// Commands that need interactive input (prompts, `read`) consume this.
     #[serde(default)]
     pub input: Option<String>,
+    /// Wait for the command to finish and return its output (default true).
+    /// When false, the response carries an `execution_id` immediately and the
+    /// command keeps running; fetch the result later with `get_command_result`.
+    #[serde(default)]
+    pub wait: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -305,6 +313,10 @@ pub struct RunCommandResult {
     /// Combined stdout+stderr captured so far (streaming continues via
     /// `command_output` notifications).
     pub output: String,
+    /// Present when the command was started with `wait: false`: pass this to
+    /// `get_command_result` to fetch the result later.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -372,6 +384,34 @@ pub struct PingResult {
     pub ok: bool,
     pub hostname: String,
     pub pid: u32,
+}
+
+/// Params for `get_command_result`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetCommandResultParams {
+    /// Execution id returned by `run_command` with `wait: false`.
+    pub execution_id: u64,
+    /// Return only the first N lines of output.
+    #[serde(default)]
+    pub head: Option<usize>,
+    /// Return only the last N lines of output.
+    #[serde(default)]
+    pub tail: Option<usize>,
+}
+
+/// Result of `get_command_result`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetCommandResult {
+    /// True once the command has exited.
+    pub done: bool,
+    /// Exit code, when `done`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// True if the command was killed by its timeout.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timed_out: Option<bool>,
+    /// Output so far (or final output when `done`), trimmed by head/tail.
+    pub output: String,
 }
 
 /// One connected target (agent), as reported by the relay.
@@ -457,11 +497,13 @@ mod tests {
             env: None,
             timeout_secs: Some(5),
             input: Some("hello\n".into()),
+            wait: Some(false),
         };
         let json = serde_json::to_string(&params).unwrap();
         let back: RunCommandParams = serde_json::from_str(&json).unwrap();
         assert_eq!(back.input.as_deref(), Some("hello\n"));
         assert_eq!(back.timeout_secs, Some(5));
+        assert_eq!(back.wait, Some(false));
     }
 
     #[test]
