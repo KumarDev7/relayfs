@@ -22,6 +22,11 @@ pub struct RunCommandArgs {
     /// Kill the command after this many seconds (0 = no limit).
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Maximum time to wait for the command to finish. Defaults to 300s
+    /// (5 minutes); 0 = no limit. `timeout_secs` kills the command; this
+    /// only bounds how long the bridge waits for the response.
+    #[serde(default)]
+    pub request_timeout_secs: Option<u64>,
     /// Text written to the command's stdin before it starts reading.
     /// Use for commands that prompt for input (e.g. `read`, interactive
     /// installers). The command sees this as its stdin, then EOF.
@@ -139,10 +144,11 @@ impl RelayfsServer {
         Parameters(args): Parameters<RunCommandArgs>,
     ) -> Result<CallToolResult, McpError> {
         tracing::info!(
-            "mcp call run_command: {} (cwd={:?}, timeout_secs={:?}, input={} bytes)",
+            "mcp call run_command: {} (cwd={:?}, timeout_secs={:?}, request_timeout_secs={:?}, input={} bytes)",
             args.command,
             args.cwd,
             args.timeout_secs,
+            args.request_timeout_secs,
             args.input.as_ref().map_or(0, |s| s.len())
         );
         let params = serde_json::json!({
@@ -151,11 +157,25 @@ impl RelayfsServer {
             "timeout_secs": args.timeout_secs,
             "input": args.input,
         });
-        let result = self
-            .client
-            .call(relayfs_protocol::method::RUN_COMMAND, params)
-            .await
-            .map_err(|e| Self::err(e.message))?;
+        // Wait bound: default 5 minutes, 0 = no limit. The command itself
+        // keeps running on the target either way; this only bounds how long
+        // the bridge waits for the response.
+        let wait_secs = args.request_timeout_secs.unwrap_or(300);
+        let result = if wait_secs > 0 {
+            self.client
+                .call_timeout(
+                    relayfs_protocol::method::RUN_COMMAND,
+                    params,
+                    std::time::Duration::from_secs(wait_secs),
+                )
+                .await
+                .map_err(|e| Self::err(e.message))?
+        } else {
+            self.client
+                .call(relayfs_protocol::method::RUN_COMMAND, params)
+                .await
+                .map_err(|e| Self::err(e.message))?
+        };
         let result: relayfs_protocol::RunCommandResult =
             serde_json::from_value(result).map_err(Self::err)?;
         tracing::info!(
