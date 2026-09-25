@@ -8,7 +8,9 @@ pub mod conn;
 pub mod files;
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use relayfs_rpc::ReconnectBackoff;
 use tokio::sync::Mutex;
 
 /// Shared agent state.
@@ -42,12 +44,20 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     let state = Arc::new(AgentState::new(token.to_string()));
 
+    let max_retry = Duration::from_secs(reconnect_secs.max(1));
+    let mut backoff = ReconnectBackoff::new(max_retry);
+
     loop {
+        let connected_at = Instant::now();
         match conn::run(base_url, token, id, name, state.clone()).await {
             Ok(()) => tracing::info!("connection closed cleanly"),
             Err(e) => tracing::error!("connection error: {e}"),
         }
-        tracing::info!("reconnecting in {reconnect_secs}s");
-        tokio::time::sleep(std::time::Duration::from_secs(reconnect_secs)).await;
+        if connected_at.elapsed() >= Duration::from_secs(30) {
+            backoff.reset();
+        }
+        let retry = backoff.next_delay();
+        tracing::info!("reconnecting in {}ms", retry.as_millis());
+        tokio::time::sleep(retry).await;
     }
 }

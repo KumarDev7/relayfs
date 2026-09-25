@@ -24,22 +24,30 @@ fi
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 case "$OS" in
-    Linux) ;;
+    Linux)
+        case "$ARCH" in
+            x86_64 | amd64) TARGET="x86_64-unknown-linux-musl" ;;
+            aarch64 | arm64) TARGET="aarch64-unknown-linux-musl" ;;
+            armv7* | armhf) TARGET="armv7-unknown-linux-musleabihf" ;;
+            riscv64) TARGET="riscv64gc-unknown-linux-gnu" ;;
+            *)
+                echo "error: unsupported Linux architecture: $ARCH" >&2
+                exit 1
+                ;;
+        esac
+        ;;
     Darwin)
-        echo "error: no prebuilt macOS binary yet; build from source instead:" >&2
-        echo "  cargo install --path ." >&2
-        exit 1
+        case "$ARCH" in
+            x86_64 | amd64) TARGET="x86_64-apple-darwin" ;;
+            aarch64 | arm64) TARGET="aarch64-apple-darwin" ;;
+            *)
+                echo "error: unsupported macOS architecture: $ARCH" >&2
+                exit 1
+                ;;
+        esac
         ;;
     *)
         echo "error: unsupported OS: $OS" >&2
-        exit 1
-        ;;
-esac
-case "$ARCH" in
-    x86_64 | amd64) TARGET="x86_64-unknown-linux-musl" ;;
-    aarch64 | arm64) TARGET="aarch64-unknown-linux-musl" ;;
-    *)
-        echo "error: unsupported architecture: $ARCH" >&2
         exit 1
         ;;
 esac

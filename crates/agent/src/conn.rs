@@ -28,7 +28,9 @@ pub async fn run(
     // unification); pick ring explicitly so wss:// works.
     let _ = rustls::crypto::ring::default_provider().install_default();
     let url = relayfs_rpc::relay_ws_url(base_url);
-    let (ws, _) = connect_async(&url).await?;
+    let (ws, _) = tokio::time::timeout(std::time::Duration::from_secs(10), connect_async(&url))
+        .await
+        .map_err(|_| anyhow::anyhow!("relay connection timed out after 10s"))??;
     info!("connected to relay {url}");
     let mut ws = ws;
 
@@ -42,20 +44,23 @@ pub async fn run(
     ws.send(Message::Text(serde_json::to_string(&hello)?.into()))
         .await?;
 
-    // Wait for hello_ack.
-    loop {
-        let Some(msg) = ws.next().await else {
-            return Ok(());
-        };
-        let msg = msg?;
-        if let Message::Text(text) = msg {
-            let value: serde_json::Value = serde_json::from_str(&text)?;
-            if value.get("method").and_then(|m| m.as_str()) == Some("hello_ack") {
-                info!("handshake complete: {}", value);
-                break;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let Some(msg) = ws.next().await else {
+                return Err(anyhow::anyhow!("relay closed during handshake"));
+            };
+            let msg = msg?;
+            if let Message::Text(text) = msg {
+                let value: serde_json::Value = serde_json::from_str(&text)?;
+                if value.get("method").and_then(|m| m.as_str()) == Some("hello_ack") {
+                    info!("handshake complete");
+                    return Ok(());
+                }
             }
         }
-    }
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("relay handshake timed out after 10s"))??;
 
     // Keepalive is handled by the relay: it pings every connected peer every
     // 30s, and we pong in the read loop below — real traffic on the wire keeps
@@ -129,8 +134,10 @@ async fn dispatch(
         .cloned()
         .unwrap_or(serde_json::Value::Null);
 
-    // Transparency: log every request the agent executes, with its arguments.
-    tracing::info!("executing {method}: {}", params);
+    // Transparency: log every request the agent executes. Params carry whole
+    // file payloads (megabytes of base64 per transfer RPC), so they stay off
+    // the default `info` level.
+    tracing::debug!("executing {method}: {}", params);
 
     let result = match method.as_str() {
         relayfs_protocol::method::RUN_COMMAND => {

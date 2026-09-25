@@ -4,6 +4,7 @@
 Usage: python3 scripts/smoke_test.py [path-to-relayfs-binary]
 Default binary: target/release/relayfs (must be built first).
 """
+import itertools
 import json
 import os
 import select
@@ -17,8 +18,10 @@ import time
 BIN = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "target", "release", "relayfs"
 )
+# Fixed base; derived per-process so concurrent runs never share a port
+# (PID range keeps us clear of the default 18787 and common service ports).
 TOKEN = "ci-token"
-PORT = 18787  # fixed; CI runners are isolated
+PORT = int(os.environ.get("SMOKE_PORT", str(18787 + (os.getpid() % 400))))
 
 
 def wait_port(port, timeout=10):
@@ -65,6 +68,8 @@ def main():
         )
         procs.append(bridge)
 
+        next_id = itertools.count(1)
+
         def send(obj):
             bridge.stdin.write((json.dumps(obj) + "\n").encode())
             bridge.stdin.flush()
@@ -75,9 +80,17 @@ def main():
                 raise TimeoutError("no response from bridge")
             return json.loads(bridge.stdout.readline())
 
-        def call(method, params=None, timeout=20):
-            send({"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}})
-            return recv(timeout)
+        def call(method, params=None, timeout=20, request_id=None):
+            if request_id is None:
+                request_id = next(next_id)
+            send({"jsonrpc": "2.0", "id": request_id, "method": method,
+                  "params": params or {}})
+            while True:
+                message = recv(timeout)
+                # Notifications arrive interleaved with responses (for example
+                # command_finished and agent_connected); skip them.
+                if message.get("id") == request_id:
+                    return message
 
         # MCP handshake
         r = call("initialize", {"protocolVersion": "2025-11-25", "capabilities": {},
@@ -88,7 +101,11 @@ def main():
         # tools/list
         r = call("tools/list")
         tools = [t["name"] for t in r["result"]["tools"]]
-        assert "run_command" in tools and "mount_remote" in tools and "ping" in tools, tools
+        assert "run_command" in tools and "mount_remote" in tools and "ping" in tools and "skill" in tools, tools
+
+        # skill
+        r = call("tools/call", {"name": "skill", "arguments": {}})
+        assert "relayfs" in r["result"]["content"][0]["text"] and "MCP tools" in r["result"]["content"][0]["text"], r
 
         # ping
         r = call("tools/call", {"name": "ping", "arguments": {}})

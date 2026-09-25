@@ -3,6 +3,7 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -13,15 +14,49 @@ env:
 jobs:
   build:
     name: build (${{ matrix.target }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os || 'ubuntu-latest' }}
+    continue-on-error: ${{ matrix.allow_failure || false }}
     strategy:
       fail-fast: false
       matrix:
         include:
+          # Linux static musl targets (run anywhere on Linux)
           - target: x86_64-unknown-linux-musl
             artifact: relayfs-x86_64-unknown-linux-musl
+            use_zigbuild: true
           - target: aarch64-unknown-linux-musl
             artifact: relayfs-aarch64-unknown-linux-musl
+            use_zigbuild: true
+          - target: armv7-unknown-linux-musleabihf
+            artifact: relayfs-armv7-unknown-linux-musleabihf
+            use_zigbuild: true
+
+          # Linux glibc targets
+          - target: x86_64-unknown-linux-gnu
+            artifact: relayfs-x86_64-unknown-linux-gnu
+            use_zigbuild: true
+          - target: aarch64-unknown-linux-gnu
+            artifact: relayfs-aarch64-unknown-linux-gnu
+            use_zigbuild: true
+          - target: armv7-unknown-linux-gnueabihf
+            artifact: relayfs-armv7-unknown-linux-gnueabihf
+            use_zigbuild: true
+          - target: riscv64gc-unknown-linux-gnu
+            artifact: relayfs-riscv64gc-unknown-linux-gnu
+            use_zigbuild: true
+
+          # macOS targets
+          - target: x86_64-apple-darwin
+            artifact: relayfs-x86_64-apple-darwin
+            os: macos-13
+            use_zigbuild: false
+            allow_failure: true
+          - target: aarch64-apple-darwin
+            artifact: relayfs-aarch64-apple-darwin
+            os: macos-14
+            use_zigbuild: false
+            allow_failure: true
+
     steps:
       - uses: actions/checkout@v4
 
@@ -30,21 +65,32 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # Static musl builds run on any Linux regardless of glibc version
-      # (GitHub's ubuntu-latest runners build against glibc 2.39, which
-      # rejects older distros). zig + cargo-zigbuild cross-link cleanly and
-      # handle the ring crate's C sources.
-      - uses: goto-bus-stop/setup-zig@v2
-      - uses: taiki-e/install-action@v2
+      - name: Setup Zig & cargo-zigbuild (Linux cross-compilation)
+        if: matrix.use_zigbuild
+        uses: goto-bus-stop/setup-zig@v2
+
+      - name: Install cargo-zigbuild
+        if: matrix.use_zigbuild
+        uses: taiki-e/install-action@v2
         with:
           tool: cargo-zigbuild
+
+      - name: Install macOS FUSE headers
+        if: runner.os == 'macOS'
+        run: |
+          brew install --cask macfuse || true
 
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
 
-      - name: Build release binary (static musl)
+      - name: Build release binary (cargo-zigbuild)
+        if: matrix.use_zigbuild
         run: cargo zigbuild --release --target ${{ matrix.target }}
+
+      - name: Build release binary (cargo)
+        if: "!matrix.use_zigbuild"
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Package binary
         run: |

@@ -1,6 +1,9 @@
 //! MCP server: exposes the remote machine as MCP tools.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use rmcp::{
     handler::server::wrapper::Parameters, model::*, schemars, service::RequestContext, tool,
@@ -64,6 +67,30 @@ pub struct WriteFileArgs {
     /// File contents (UTF-8 text).
     pub content: String,
     /// Create parent directories if missing.
+    #[serde(default)]
+    pub create_dirs: Option<bool>,
+}
+
+/// Upload a local file to the connected target without mounting it.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UploadFileArgs {
+    /// Source file path on the local MCP machine.
+    pub local_path: String,
+    /// Destination file path on the remote target.
+    pub remote_path: String,
+    /// Create the remote parent directory when absent.
+    #[serde(default)]
+    pub create_dirs: Option<bool>,
+}
+
+/// Download a remote file to the local MCP machine without mounting it.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DownloadFileArgs {
+    /// Source file path on the remote target.
+    pub remote_path: String,
+    /// Destination file path on the local MCP machine.
+    pub local_path: String,
+    /// Create the local parent directory when absent.
     #[serde(default)]
     pub create_dirs: Option<bool>,
 }
@@ -135,6 +162,7 @@ pub struct GetCommandResultArgs {
 }
 
 /// The relayfs MCP server.
+#[derive(Clone)]
 pub struct RelayfsServer {
     client: Arc<AgentClient>,
     mounts: Arc<MountManager>,
@@ -151,6 +179,16 @@ impl RelayfsServer {
     }
 }
 
+const TRANSFER_CHUNK_BYTES: usize = 1024 * 1024;
+
+fn temporary_path(path: &Path, label: &str) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+    parent.join(format!(
+        ".{file_name}.relayfs-{label}-{:016x}",
+        rand::random::<u64>()
+    ))
+}
 #[tool_router]
 impl RelayfsServer {
     /// Run a command on the remote machine. Output is streamed back as it is produced.
@@ -288,6 +326,211 @@ impl RelayfsServer {
             "wrote {} bytes",
             result.bytes_written
         ))]))
+    }
+
+    /// Upload a local file to the remote machine in bounded chunks.
+    ///
+    /// The target sees either its original file or the complete upload: data
+    /// is written to a sibling temporary file and renamed only on success.
+    #[tool(description = "Upload a local file to the remote machine atomically")]
+    async fn upload_file(
+        &self,
+        Parameters(args): Parameters<UploadFileArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let local_path = PathBuf::from(&args.local_path);
+        let remote_temp = format!(
+            "{}.relayfs-upload-{:016x}",
+            args.remote_path,
+            rand::random::<u64>()
+        );
+        tracing::info!(
+            "mcp upload_file: {} -> {} (create_dirs={:?})",
+            local_path.display(),
+            args.remote_path,
+            args.create_dirs
+        );
+
+        let mut source = tokio::fs::File::open(&local_path)
+            .await
+            .map_err(|e| Self::err(format!("open local source {}: {e}", local_path.display())))?;
+        let transfer = async {
+            self.client
+                .call(
+                    relayfs_protocol::method::WRITE_FILE,
+                    serde_json::json!({
+                        "path": remote_temp,
+                        "data": "",
+                        "create_dirs": args.create_dirs,
+                    }),
+                )
+                .await
+                .map_err(|e| Self::err(e.message))?;
+
+            let mut offset = 0u64;
+            let mut buffer = vec![0; TRANSFER_CHUNK_BYTES];
+            loop {
+                let read = source.read(&mut buffer).await.map_err(|e| {
+                    Self::err(format!("read local source {}: {e}", local_path.display()))
+                })?;
+                if read == 0 {
+                    break;
+                }
+                self.client
+                    .call(
+                        relayfs_protocol::method::WRITE_AT,
+                        serde_json::json!({
+                            "path": remote_temp,
+                            "offset": offset,
+                            "data": base64_encode(&buffer[..read]),
+                        }),
+                    )
+                    .await
+                    .map_err(|e| Self::err(e.message))?;
+                offset += read as u64;
+            }
+            self.client
+                .call(
+                    relayfs_protocol::method::TRUNCATE,
+                    serde_json::json!({ "path": remote_temp, "size": offset }),
+                )
+                .await
+                .map_err(|e| Self::err(e.message))?;
+            Ok::<u64, McpError>(offset)
+        }
+        .await;
+
+        let bytes = match transfer {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let _ = self
+                    .client
+                    .call(
+                        relayfs_protocol::method::REMOVE,
+                        serde_json::json!({ "path": remote_temp, "recursive": false }),
+                    )
+                    .await;
+                return Err(error);
+            }
+        };
+        if let Err(error) = self
+            .client
+            .call(
+                relayfs_protocol::method::RENAME,
+                serde_json::json!({ "from": remote_temp, "to": args.remote_path }),
+            )
+            .await
+        {
+            let _ = self
+                .client
+                .call(
+                    relayfs_protocol::method::REMOVE,
+                    serde_json::json!({ "path": remote_temp, "recursive": false }),
+                )
+                .await;
+            return Err(Self::err(error.message));
+        }
+
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            serde_json::json!({ "bytes_uploaded": bytes }).to_string(),
+        )]))
+    }
+
+    /// Download a remote file to the local MCP machine in bounded chunks.
+    ///
+    /// The destination is replaced only after the complete transfer has been
+    /// written and synced locally.
+    #[tool(description = "Download a remote file to the local machine atomically")]
+    async fn download_file(
+        &self,
+        Parameters(args): Parameters<DownloadFileArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let local_path = PathBuf::from(&args.local_path);
+        if args.create_dirs.unwrap_or(false) {
+            if let Some(parent) = local_path
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+            {
+                tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                    Self::err(format!("create local directory {}: {e}", parent.display()))
+                })?;
+            }
+        }
+        let local_temp = temporary_path(&local_path, "download");
+        tracing::info!(
+            "mcp download_file: {} -> {} (create_dirs={:?})",
+            args.remote_path,
+            local_path.display(),
+            args.create_dirs
+        );
+
+        let transfer = async {
+            let mut destination = tokio::fs::File::create(&local_temp).await.map_err(|e| {
+                Self::err(format!(
+                    "create local destination {}: {e}",
+                    local_temp.display()
+                ))
+            })?;
+            let mut offset = 0u64;
+            loop {
+                let result = self
+                    .client
+                    .call(
+                        relayfs_protocol::method::READ_FILE,
+                        serde_json::json!({
+                            "path": args.remote_path,
+                            "offset": offset,
+                            "limit": TRANSFER_CHUNK_BYTES,
+                        }),
+                    )
+                    .await
+                    .map_err(|e| Self::err(e.message))?;
+                let read: relayfs_protocol::ReadFileResult =
+                    serde_json::from_value(result).map_err(Self::err)?;
+                let data = base64_decode(&read.data).map_err(Self::err)?;
+                if data.is_empty() && !read.eof {
+                    return Err(Self::err(
+                        "remote transfer returned an empty non-final chunk",
+                    ));
+                }
+                destination.write_all(&data).await.map_err(|e| {
+                    Self::err(format!(
+                        "write local destination {}: {e}",
+                        local_temp.display()
+                    ))
+                })?;
+                offset += data.len() as u64;
+                if read.eof {
+                    destination.sync_all().await.map_err(|e| {
+                        Self::err(format!(
+                            "sync local destination {}: {e}",
+                            local_temp.display()
+                        ))
+                    })?;
+                    return Ok::<u64, McpError>(offset);
+                }
+            }
+        }
+        .await;
+
+        let bytes = match transfer {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let _ = tokio::fs::remove_file(&local_temp).await;
+                return Err(error);
+            }
+        };
+        tokio::fs::rename(&local_temp, &local_path)
+            .await
+            .map_err(|e| {
+                Self::err(format!(
+                    "replace local destination {}: {e}",
+                    local_path.display()
+                ))
+            })?;
+
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            serde_json::json!({ "bytes_downloaded": bytes }).to_string(),
+        )]))
     }
 
     /// List a directory on the remote machine.
@@ -567,6 +810,17 @@ impl RelayfsServer {
         }
         Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
     }
+
+    /// Return the relayfs skill document (app overview, principles, caveats).
+    #[tool(
+        description = "Return the relayfs skill document describing all modes, tools, principles, and caveats"
+    )]
+    async fn skill(&self) -> Result<CallToolResult, McpError> {
+        tracing::info!("mcp call skill");
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            relayfs_skill::SKILL,
+        )]))
+    }
 }
 
 #[tool_handler]
@@ -575,4 +829,79 @@ impl ServerHandler for RelayfsServer {}
 fn base64_encode(data: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(data)
+}
+
+fn base64_decode(data: &str) -> Result<Vec<u8>, String> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|e| format!("invalid base64 returned by target: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn download_replaces_the_destination_from_a_chunked_source() {
+        // 1.5 MiB source read through the real 1 MiB chunk size.
+        let source_dir = tempfile::tempdir().unwrap();
+        let source = source_dir.path().join("remote.bin");
+        let payload: Vec<u8> = (0..3 * 512 * 1024u32).map(|i| (i * 31 + 7) as u8).collect();
+        tokio::fs::write(&source, &payload).await.unwrap();
+
+        let destination_dir = tempfile::tempdir().unwrap();
+        let destination = destination_dir.path().join("nested").join("local.bin");
+        // The destination directory must exist before the temporary file and
+        // the final rename can land in it.
+        tokio::fs::create_dir_all(destination.parent().unwrap())
+            .await
+            .unwrap();
+        let temporary = temporary_path(&destination, "download");
+
+        let mut file = tokio::fs::File::create(&temporary).await.unwrap();
+        let mut offset = 0u64;
+        loop {
+            let end = (offset + TRANSFER_CHUNK_BYTES as u64).min(payload.len() as u64);
+            file.write_all(&payload[offset as usize..end as usize])
+                .await
+                .unwrap();
+            offset = end;
+            if offset as usize >= payload.len() {
+                break;
+            }
+        }
+        file.sync_all().await.unwrap();
+        drop(file);
+
+        tokio::fs::rename(&temporary, &destination).await.unwrap();
+
+        let written = tokio::fs::read(&destination).await.unwrap();
+        assert_eq!(written.len(), payload.len());
+        assert_eq!(written, payload);
+        assert!(!temporary.exists(), "temporary file survived the replace");
+    }
+
+    #[test]
+    fn temporary_path_stays_in_the_destination_directory() {
+        let path = Path::new("/srv/app/report.tar.gz");
+        let temporary = temporary_path(path, "upload");
+        assert_eq!(temporary.parent(), path.parent());
+        let name = temporary
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(name.contains("report.tar.gz"), "{name}");
+        assert!(name.starts_with('.'), "{name}");
+        assert!(name.contains("relayfs-upload-"), "{name}");
+    }
+
+    #[test]
+    fn each_temporary_path_is_unique() {
+        let path = Path::new("/srv/app/report.tar.gz");
+        let first = temporary_path(path, "upload");
+        let second = temporary_path(path, "upload");
+        assert_ne!(first, second);
+    }
 }

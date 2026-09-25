@@ -1,0 +1,20 @@
+services:
+  relay:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: relayfs-relay:deployed
+    container_name: relayfs-relay
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8788:8788"
+    command:
+      - "/usr/local/bin/relayfs"
+      - "--mode"
+      - "server"
+      - "--listen"
+      - "0.0.0.0:8788"
+      - "--token"
+      - "${RELAYFS_TOKEN:-secret}"
+    environment:
+      - RUST_LOG=info

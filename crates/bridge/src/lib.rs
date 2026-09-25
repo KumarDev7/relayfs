@@ -7,7 +7,12 @@
 
 pub mod client;
 pub mod fuse_fs;
+pub mod http;
 pub mod mcp;
+
+pub use client::AgentClient;
+pub use http::{make_router, run_http, HttpState};
+pub use mcp::RelayfsServer;
 
 use std::sync::Arc;
 

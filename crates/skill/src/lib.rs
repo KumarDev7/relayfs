@@ -56,25 +56,28 @@ full reference.
 
 ## MCP tools (mcp mode)
 
-15 tools:
+18 tools:
 
-| Tool             | Purpose                                                        |
-|------------------|----------------------------------------------------------------|
-| run_command      | run a shell command remotely; output streams live as it runs   |
-| read_file        | read a file (base64, offset/limit)                             |
-| write_file       | write a file (UTF-8 text, optional create_dirs)                |
-| list_dir         | list a remote directory                                        |
-| stat             | metadata: kind, size, mode, uid/gid, symlink target           |
-| mkdir            | create a directory (with mode)                                |
-| remove           | remove a file or directory (recursive option)                 |
-| rename           | rename / move                                                 |
-| copy             | copy a file or directory (recursive option)                   |
-| mount_remote     | FUSE-mount a remote directory into the local filesystem      |
-| unmount_remote   | tear down a mount                                              |
-| list_mounts      | list active mounts                                            |
-| ping             | target health check                                            |
-| list_targets     | list all targets connected to the relay (answered by the relay) |
+| Tool               | Purpose                                                        |
+|--------------------|----------------------------------------------------------------|
+| run_command        | run a shell command remotely; output streams live as it runs   |
+| read_file          | read a file (base64, offset/limit)                             |
+| write_file         | write a file (UTF-8 text, optional create_dirs)                |
+| upload_file        | upload a local file to target atomically in 1 MiB chunks (create_dirs) |
+| download_file      | download a target file to local machine atomically in 1 MiB chunks (create_dirs) |
+| list_dir           | list a remote directory                                        |
+| stat               | metadata: kind, size, mode, uid/gid, symlink target           |
+| mkdir              | create a directory (with mode)                                |
+| remove             | remove a file or directory (recursive option)                 |
+| rename             | rename / move                                                  |
+| copy               | copy a file or directory (recursive option)                   |
+| mount_remote       | FUSE-mount a remote directory into the local filesystem       |
+| unmount_remote     | tear down a mount                                              |
+| list_mounts        | list active mounts                                             |
+| ping               | target health check                                            |
+| list_targets       | list all targets connected to the relay (answered by the relay) |
 | get_command_result | fetch a command's result by execution_id (head/tail options)  |
+| skill              | return the relayfs skill document (modes, tools, principles)   |
 
 ## Working principles
 
@@ -110,21 +113,32 @@ full reference.
    the mcp side logs the call and its completion (exit code / timeout), the
    target logs what it executes and when it finishes.
 
-5. **FUSE mount semantics.** `mount_remote` mounts a remote directory into
-   your local filesystem as a real kernel mount (`/dev/fuse`). Every kernel
-   operation — lookup, getattr, read, write, readdir, mkdir, unlink, rename,
-   chmod, truncate, symlink — is translated into an RPC to the target. The
-   mount point IS the remote directory: there is no copy, no watcher, no
-   batch sync. Writes land on the remote machine immediately (on file close
-   / fsync, like a normal local disk). The mount lives on the mcp machine;
-   the target only serves file operations.
+5. **FUSE mount semantics & offline resilience.** `mount_remote` mounts a
+   remote directory into your local filesystem as a real kernel mount
+   (`/dev/fuse`) backed by a local disk cache (`~/.cache/relayfs/mounts/...`).
+   Reads and file copies stream in 1 MiB chunks and are cached locally for
+   line-speed throughput. If the target disconnects, the mount seamlessly falls
+   back to the local cache: `ls`, `cp`, editors, and reads continue working
+   normally without freezing or errors. Active mounts clean up automatically
+   on process exit to prevent orphaned mount endpoints.
 
 6. **Lifecycle.** The relay pings every connected peer every 30s, so idle
    connections survive intermediary idle timeouts (Cloudflare, nginx). Both
    the target and the mcp client reconnect automatically after a dropped
-   connection (default 5s). Requests made during a reconnection window fail
-   fast with a `relay connection offline (reconnecting)` error; retry them.
-   Mounts are torn down when the mcp process exits.
+   connection: retries begin after 250ms and exponentially back off to the
+   configured maximum (5 seconds by default). Requests made during a
+   reconnection window fail fast with a `relay connection offline
+   (reconnecting)` error; retry them. Mounts are torn down when the mcp
+   process exits.
+
+7. **Atomic file transfers (upload_file & download_file).** `upload_file` and
+   `download_file` transfer arbitrarily large files in bounded 1 MiB chunks
+   without mounting. Transfers are strictly atomic: data writes into a sibling
+   temporary file (`.filename.relayfs-upload-<hash>`) and atomically replaces
+   the destination only upon complete sync. If a transfer fails or is
+   interrupted, the temporary file is deleted and the destination is never
+   left in a corrupted or half-written state. Passing `create_dirs: true`
+   creates missing destination parent directories automatically.
 
 ## Caveats
 
@@ -144,9 +158,10 @@ full reference.
 - **Network / target failure.** Operations fail with `EIO` (filesystem error)
   — never silently. Your editor will show a save error, which is correct.
 
-- **Performance.** Every operation is a network round trip. Fine for
-  editing, `ls`, small builds. Do NOT run heavy builds or copy large files
-  through the mount — run heavy work remotely via `run_command` instead.
+- **Performance.** Reads and copies are accelerated by local caching and 1 MiB
+  chunk streaming. For heavy builds or package installations, running work
+  remotely via `run_command` is still recommended to avoid unnecessary network
+  traffic.
 
 - **Security.** The target executes commands as the user it runs under. Run
   it with a dedicated, least-privilege user on the remote machine. Use
@@ -163,9 +178,13 @@ full reference.
 - **Heavy work** (builds, installs, data processing) → `run_command` on the
   remote machine, never inside the mount.
 - **One-off file access** → `read_file` / `write_file` / `list_dir` / `stat`
-  are cheaper than a mount for single operations.
+  are cheaper than a mount for single operations (up to 8 MiB limit).
+- **Transfer large or standalone files** → `upload_file` and `download_file`
+  stream files in 1 MiB chunks with atomic temporary replacement and optional
+  directory creation (`create_dirs: true`), ideal for logs, releases, and archives.
 - **Check health first** → `ping` before a long session; if the target is
   offline, requests fail fast with a clear error.
+- **Inspect app principles & reference** → `skill` returns this complete document at runtime.
 "#;
 
 /// Print the skill document to stdout.

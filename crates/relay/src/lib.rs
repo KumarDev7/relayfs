@@ -26,13 +26,41 @@ use tracing::{error, info, warn};
 type Token = String;
 
 #[derive(Clone)]
-struct AppState {
+pub struct AppState {
     /// agent token -> connected agent
-    agents: Arc<RwLock<HashMap<Token, Arc<RelayPeer>>>>,
+    pub(crate) agents: Arc<RwLock<HashMap<Token, Arc<RelayPeer>>>>,
     /// agent token -> connected bridges
-    bridges: Arc<RwLock<HashMap<Token, Vec<Arc<RelayPeer>>>>>,
+    pub(crate) bridges: Arc<RwLock<HashMap<Token, Vec<Arc<RelayPeer>>>>>,
     /// If set, every peer must present this token.
-    required_token: Option<String>,
+    pub required_token: Option<String>,
+}
+
+impl AppState {
+    pub fn new(required_token: Option<String>) -> Self {
+        Self {
+            agents: Arc::new(RwLock::new(HashMap::new())),
+            bridges: Arc::new(RwLock::new(HashMap::new())),
+            required_token,
+        }
+    }
+}
+
+pub fn make_router(state: AppState) -> Router {
+    Router::new()
+        .route("/ws", get(ws_handler))
+        .route("/healthz", get(|| async { "ok" }))
+        .with_state(state)
+}
+
+/// Run the relay server until the process is terminated.
+pub async fn run(listen: &str, token: Option<&str>) -> anyhow::Result<()> {
+    let state = AppState::new(token.map(String::from));
+    let app = make_router(state);
+
+    let listener = tokio::net::TcpListener::bind(listen).await?;
+    info!("relayfs relay listening on ws://{listen}/ws");
+    axum::serve(listener, app).await?;
+    Ok(())
 }
 
 struct RelayPeer {
@@ -65,26 +93,7 @@ impl RelayPeer {
     }
 }
 
-/// Run the relay server until the process is terminated.
-pub async fn run(listen: &str, token: Option<&str>) -> anyhow::Result<()> {
-    let state = AppState {
-        agents: Arc::new(RwLock::new(HashMap::new())),
-        bridges: Arc::new(RwLock::new(HashMap::new())),
-        required_token: token.map(String::from),
-    };
-
-    let app = Router::new()
-        .route("/ws", get(ws_handler))
-        .route("/healthz", get(|| async { "ok" }))
-        .with_state(state);
-
-    let listener = tokio::net::TcpListener::bind(listen).await?;
-    info!("relayfs relay listening on ws://{listen}/ws");
-    axum::serve(listener, app).await?;
-    Ok(())
-}
-
-async fn ws_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> impl IntoResponse {
+pub async fn ws_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_connection(state, socket))
 }
 

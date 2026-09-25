@@ -4,11 +4,11 @@
 //! the `session` / `target` fields from the params, forwards the *raw* params
 //! value to the peer, and never inspects the method body.
 
-use std::sync::Arc;
-
 use futures::{SinkExt, StreamExt};
 use relayfs_protocol::{Hello, HelloAck, Notification, Request, Response, RpcError, SessionId};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio_tungstenite::{
@@ -18,6 +18,40 @@ use tokio_tungstenite::{
 use tokio_util::sync::CancellationToken;
 
 pub type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+/// Bounded exponential retry schedule for transient relay failures.
+///
+/// The first retry is intentionally fast so a short network interruption does
+/// not make an MCP session feel stalled. Callers reset it after a stable
+/// connection.
+#[derive(Debug, Clone)]
+pub struct ReconnectBackoff {
+    next: Duration,
+    max: Duration,
+}
+
+impl ReconnectBackoff {
+    pub const INITIAL: Duration = Duration::from_millis(250);
+
+    pub fn new(max: Duration) -> Self {
+        Self {
+            next: Self::INITIAL.min(max),
+            max,
+        }
+    }
+
+    /// Return the current delay and advance the following retry, capped at
+    /// `max`.
+    pub fn next_delay(&mut self) -> Duration {
+        let delay = self.next;
+        self.next = self.next.saturating_mul(2).min(self.max);
+        delay
+    }
+
+    pub fn reset(&mut self) {
+        self.next = Self::INITIAL.min(self.max);
+    }
+}
 
 /// A connected peer (bridge or agent) with a live WebSocket.
 pub struct Peer {
@@ -246,5 +280,34 @@ mod tests {
         assert_eq!(err["error"]["code"], relayfs_protocol::code::AGENT_OFFLINE);
         assert_eq!(err["error"]["message"], "agent is not connected");
         assert!(err.get("result").is_none());
+    }
+
+    #[test]
+    fn backoff_starts_fast_and_doubles_up_to_the_cap() {
+        let mut backoff = ReconnectBackoff::new(Duration::from_secs(5));
+        assert_eq!(backoff.next_delay(), ReconnectBackoff::INITIAL);
+        assert_eq!(backoff.next_delay(), Duration::from_millis(500));
+        assert_eq!(backoff.next_delay(), Duration::from_secs(1));
+        assert_eq!(backoff.next_delay(), Duration::from_secs(2));
+        assert_eq!(backoff.next_delay(), Duration::from_secs(4));
+        assert_eq!(backoff.next_delay(), Duration::from_secs(5));
+        assert_eq!(backoff.next_delay(), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_stable_connection_resets_the_delay() {
+        let mut backoff = ReconnectBackoff::new(Duration::from_secs(5));
+        let _ = backoff.next_delay();
+        let _ = backoff.next_delay();
+        backoff.reset();
+        assert_eq!(backoff.next_delay(), ReconnectBackoff::INITIAL);
+    }
+
+    #[test]
+    fn a_cap_below_the_initial_delay_is_respected() {
+        let max = Duration::from_millis(100);
+        let mut backoff = ReconnectBackoff::new(max);
+        assert_eq!(backoff.next_delay(), max);
+        assert_eq!(backoff.next_delay(), max);
     }
 }

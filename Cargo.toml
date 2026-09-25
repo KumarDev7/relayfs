@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/KumarDev7/relayfs"
@@ -31,7 +31,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # mcp
-rmcp = { version = "3.1", features = ["server", "client", "macros", "schemars", "transport-io"] }
+rmcp = { version = "3.1", features = ["server", "client", "macros", "schemars", "transport-io", "transport-streamable-http-server"] }
 
 # websocket
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }

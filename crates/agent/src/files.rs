@@ -11,6 +11,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::conn::{send_notification, WsSink};
 
+/// Maximum raw bytes accepted by a single non-streaming file RPC.
+///
+/// Large transfers use chunked bridge-side upload/download instead, keeping a
+/// malformed MCP request from allocating unbounded memory on the target.
+const MAX_DIRECT_FILE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_DIRECT_FILE_BASE64_BYTES: usize = ((MAX_DIRECT_FILE_BYTES as usize).div_ceil(3)) * 4;
+
 pub async fn read_file(params: serde_json::Value) -> anyhow::Result<serde_json::Value> {
     let params: ReadFileParams = serde_json::from_value(params)?;
     let path = PathBuf::from(&params.path);
@@ -20,6 +27,12 @@ pub async fn read_file(params: serde_json::Value) -> anyhow::Result<serde_json::
 
     let offset = params.offset.unwrap_or(0);
     let limit = params.limit.unwrap_or(1024 * 1024);
+    if limit > MAX_DIRECT_FILE_BYTES {
+        return Err(anyhow::anyhow!(
+            "read limit exceeds the {} byte maximum",
+            MAX_DIRECT_FILE_BYTES
+        ));
+    }
     use tokio::io::AsyncSeekExt;
     if offset > 0 {
         file.seek(std::io::SeekFrom::Start(offset)).await?;
@@ -47,7 +60,19 @@ pub async fn write_file(params: serde_json::Value) -> anyhow::Result<serde_json:
         }
     }
 
+    if params.data.len() > MAX_DIRECT_FILE_BASE64_BYTES {
+        return Err(anyhow::anyhow!(
+            "file data exceeds the {} byte maximum",
+            MAX_DIRECT_FILE_BYTES
+        ));
+    }
     let data = base64_decode(&params.data)?;
+    if data.len() as u64 > MAX_DIRECT_FILE_BYTES {
+        return Err(anyhow::anyhow!(
+            "file data exceeds the {} byte maximum",
+            MAX_DIRECT_FILE_BYTES
+        ));
+    }
     let mut file = tokio::fs::File::create(&path)
         .await
         .map_err(|e| anyhow::anyhow!("create {}: {e}", path.display()))?;
@@ -212,7 +237,19 @@ pub async fn rename(params: serde_json::Value) -> anyhow::Result<serde_json::Val
 pub async fn write_at(params: serde_json::Value) -> anyhow::Result<serde_json::Value> {
     let params: relayfs_protocol::WriteAtParams = serde_json::from_value(params)?;
     let path = PathBuf::from(&params.path);
+    if params.data.len() > MAX_DIRECT_FILE_BASE64_BYTES {
+        return Err(anyhow::anyhow!(
+            "file data exceeds the {} byte maximum",
+            MAX_DIRECT_FILE_BYTES
+        ));
+    }
     let data = base64_decode(&params.data)?;
+    if data.len() as u64 > MAX_DIRECT_FILE_BYTES {
+        return Err(anyhow::anyhow!(
+            "file data exceeds the {} byte maximum",
+            MAX_DIRECT_FILE_BYTES
+        ));
+    }
 
     use tokio::io::{AsyncSeekExt, AsyncWriteExt};
     let mut file = tokio::fs::OpenOptions::new()
