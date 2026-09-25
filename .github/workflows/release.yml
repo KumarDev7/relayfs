@@ -10,6 +10,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  PKG_CONFIG_ALLOW_CROSS: "1"
 
 jobs:
   build:
@@ -75,10 +76,16 @@ jobs:
         with:
           tool: cargo-zigbuild
 
-      - name: Install macOS FUSE headers
+      - name: Configure macOS build environment & FUSE
         if: runner.os == 'macOS'
         run: |
           brew install --cask macfuse || true
+          echo "SDKROOT=$(xcrun -sdk macosx --show-sdk-path)" >> $GITHUB_ENV
+          for dir in /usr/local/lib/pkgconfig /opt/homebrew/lib/pkgconfig /Library/Frameworks/macFUSE.framework/Resources/pkgconfig; do
+            if [ -d "$dir" ]; then
+              echo "PKG_CONFIG_PATH=$dir:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+            fi
+          done
 
       - uses: Swatinem/rust-cache@v2
         with:
