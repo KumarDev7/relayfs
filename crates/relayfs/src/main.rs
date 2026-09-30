@@ -280,7 +280,10 @@ struct HttpArgs {
 }
 
 async fn run_unified_server(listen: &str, token: Option<String>) -> anyhow::Result<()> {
-    let token_str = token.clone().unwrap_or_default();
+    let token_str = token
+        .clone()
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| "default".to_string());
     let relay_state = relayfs_relay::AppState::new(token);
 
     // 1. Internal relay on ephemeral loopback port for the HTTP MCP bridge

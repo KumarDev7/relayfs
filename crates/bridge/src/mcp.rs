@@ -40,6 +40,9 @@ pub struct RunCommandArgs {
     /// installers). The command sees this as its stdin, then EOF.
     #[serde(default)]
     pub input: Option<String>,
+    /// Optional target ID or session to execute the command on.
+    #[serde(default)]
+    pub target: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -206,13 +209,16 @@ impl RelayfsServer {
             args.request_timeout_secs,
             args.input.as_ref().map_or(0, |s| s.len())
         );
-        let params = serde_json::json!({
+        let mut params = serde_json::json!({
             "command": args.command,
             "cwd": args.cwd,
             "timeout_secs": args.timeout_secs,
             "input": args.input,
             "wait": args.wait,
         });
+        if let Some(target) = args.target {
+            params["target"] = serde_json::Value::String(target);
+        }
         // Wait bound: default 5 minutes, 0 = no limit. The command itself
         // keeps running on the target either way; this only bounds how long
         // the bridge waits for the response.
@@ -766,6 +772,12 @@ impl RelayfsServer {
         Ok(CallToolResult::success(vec![ContentBlock::text(
             lines.join("\n"),
         )]))
+    }
+
+    /// List all devices/targets connected to the relay (alias for list_targets).
+    #[tool(description = "List all devices (targets) currently connected to the relay")]
+    async fn list_devices(&self) -> Result<CallToolResult, McpError> {
+        self.list_targets().await
     }
 
     /// Fetch the result of a command started with `wait: false`.

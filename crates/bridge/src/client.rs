@@ -281,8 +281,19 @@ impl AgentClient {
                         }
                     }
                     "agent_disconnected" => {
-                        info!("agent disconnected");
-                        *self.agent_id.lock().await = None;
+                        let gone = value
+                            .get("params")
+                            .and_then(|p| p.get("agent_id"))
+                            .and_then(|a| a.as_str());
+                        let mut guard = self.agent_id.lock().await;
+                        if let Some(gone) = gone {
+                            if guard.as_deref() == Some(gone) {
+                                *guard = None;
+                            }
+                        } else {
+                            *guard = None;
+                        }
+                        info!("agent disconnected: {:?}", gone);
                     }
                     "command_finished" => {
                         if let Some(params) = value.get("params") {

@@ -151,7 +151,7 @@ async fn rejects_wrong_token() {
 }
 
 #[tokio::test]
-async fn replacing_agent_closes_old_and_keeps_new() {
+async fn multiple_agents_stay_active_and_duplicate_ids_are_suffixed() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
@@ -161,49 +161,43 @@ async fn replacing_agent_closes_old_and_keeps_new() {
             .unwrap();
     });
 
-    // First agent connects.
+    // First agent connects with id "agent".
     let mut agent_a = connect(
         port,
         Hello {
             kind: PeerKind::Agent,
-            id: "agent-a".into(),
-            name: "a".into(),
+            id: "agent".into(),
+            name: "machine-1".into(),
             token: Some(TOKEN.into()),
         },
     )
     .await;
-    let _ = recv_json(&mut agent_a).await; // hello_ack
+    let ack_a: HelloAck =
+        serde_json::from_value(recv_json(&mut agent_a).await["params"].clone()).unwrap();
+    assert_eq!(ack_a.agent_id.as_deref(), Some("agent"));
 
-    // A second agent with the same token replaces it: the relay must close
-    // the displaced connection so it doesn't linger as a zombie.
+    // Second agent connects with the SAME id "agent" and SAME token.
+    // The relay must NOT displace agent_a; both must remain active.
+    // The newly connected agent must receive a suffixed id.
     let mut agent_b = connect(
         port,
         Hello {
             kind: PeerKind::Agent,
-            id: "agent-b".into(),
-            name: "b".into(),
+            id: "agent".into(),
+            name: "machine-2".into(),
             token: Some(TOKEN.into()),
         },
     )
     .await;
-    let _ = recv_json(&mut agent_b).await; // hello_ack
-                                           // The relay must close the displaced connection (skipping keepalive
-                                           // pings that may arrive first).
-    let displaced_closed = loop {
-        match agent_a.next().await {
-            Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break true,
-            Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => continue,
-            other => {
-                panic!("expected displaced agent to be closed, got {other:?}")
-            }
-        }
-    };
-    assert!(displaced_closed, "expected displaced agent to be closed");
-    // Give the relay time to run the displaced connection's cleanup; its
-    // stale cleanup must NOT remove the new agent.
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let ack_b: HelloAck =
+        serde_json::from_value(recv_json(&mut agent_b).await["params"].clone()).unwrap();
+    let suffixed_id = ack_b.agent_id.expect("agent_b should have an assigned id");
+    assert!(
+        suffixed_id.starts_with("agent-"),
+        "expected suffixed id starting with 'agent-', got: {suffixed_id}"
+    );
 
-    // A bridge sees agent-b, and requests route to it.
+    // Bridge connects.
     let mut bridge = connect(
         port,
         Hello {
@@ -214,30 +208,79 @@ async fn replacing_agent_closes_old_and_keeps_new() {
         },
     )
     .await;
-    let ack: HelloAck =
-        serde_json::from_value(recv_json(&mut bridge).await["params"].clone()).unwrap();
-    assert_eq!(ack.agent_id.as_deref(), Some("agent-b"));
+    let _ = recv_json(&mut bridge).await; // hello_ack
 
-    let request = serde_json::json!({
+    // Query list_targets: both agents must be returned.
+    let list_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 100,
+        "method": relayfs_protocol::method::LIST_TARGETS,
+        "params": {},
+    });
+    bridge
+        .send(Message::Text(list_req.to_string().into()))
+        .await
+        .unwrap();
+    let list_resp = recv_json(&mut bridge).await;
+    let targets: Vec<relayfs_protocol::TargetInfo> =
+        serde_json::from_value(list_resp["result"]["targets"].clone()).unwrap();
+    assert_eq!(targets.len(), 2, "expected 2 active targets in list_targets");
+    let target_ids: Vec<String> = targets.into_iter().map(|t| t.id).collect();
+    assert!(target_ids.contains(&"agent".to_string()));
+    assert!(target_ids.contains(&suffixed_id));
+
+    // Targeted request to agent_a: agent_a receives it.
+    let req_a = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
+        "method": "ping",
+        "params": { "target": "agent" },
+    });
+    bridge
+        .send(Message::Text(req_a.to_string().into()))
+        .await
+        .unwrap();
+    let received_a = recv_json(&mut agent_a).await;
+    assert_eq!(received_a["id"], 1);
+
+    // Targeted request to agent_b: agent_b receives it.
+    let req_b = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "ping",
+        "params": { "target": suffixed_id },
+    });
+    bridge
+        .send(Message::Text(req_b.to_string().into()))
+        .await
+        .unwrap();
+    let received_b = recv_json(&mut agent_b).await;
+    assert_eq!(received_b["id"], 2);
+
+    // When agent_b disconnects, agent_a must still be able to receive requests.
+    drop(agent_b);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let req_a2 = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 3,
         "method": "ping",
         "params": {},
     });
     bridge
-        .send(Message::Text(request.to_string().into()))
+        .send(Message::Text(req_a2.to_string().into()))
         .await
         .unwrap();
-    let received = recv_json(&mut agent_b).await;
-    assert_eq!(received["id"], 1);
+    let received_a2 = recv_json(&mut agent_a).await;
+    assert_eq!(received_a2["id"], 3);
 
-    // When agent-b leaves, requests must start failing with AGENT_OFFLINE.
-    drop(agent_b);
+    // When agent_a also leaves, requests must start failing with AGENT_OFFLINE.
+    drop(agent_a);
     let mut saw_offline = false;
     for _ in 0..100 {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         bridge
-            .send(Message::Text(request.to_string().into()))
+            .send(Message::Text(req_a2.to_string().into()))
             .await
             .unwrap();
         let response = recv_json(&mut bridge).await;
@@ -247,7 +290,7 @@ async fn replacing_agent_closes_old_and_keeps_new() {
             break;
         }
     }
-    assert!(saw_offline, "expected AGENT_OFFLINE after agent-b left");
+    assert!(saw_offline, "expected AGENT_OFFLINE after all agents left");
 
     relay.abort();
 }
